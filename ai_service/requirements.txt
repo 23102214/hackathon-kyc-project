@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+flask
+gunicorn
+easyocr
+deepface
+xgboost
+scikit-learn
+shap
+opencv-python-headless
+pandas

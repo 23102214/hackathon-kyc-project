@@ -1,0 +1,6 @@
+{
+  "name": "AML KYC Identity Shield",
+  "description": "Enterprise-grade AI-powered KYC onboarding, identity verification, deepfake prevention, liveness matching, and continuous threat mitigation system.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

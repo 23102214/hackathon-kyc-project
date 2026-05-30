@@ -1,0 +1,14 @@
+node_modules/
+venv/
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+coverage/
+temp_uploads/
+.deepface/
+.DS_Store
+*.log
+.env*
+!.env.example

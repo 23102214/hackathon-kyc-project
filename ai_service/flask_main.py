@@ -1,0 +1,189 @@
+import sys
+import os
+import base64
+import re
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# ai_service/flask_main.py
+from flask import Flask, request, jsonify
+from werkzeug.utils import secure_filename
+import cv2
+import numpy as np
+
+# Corrected imports for 'ai_service' folder [8]
+from ai_service.modules.ocr.ocr_service import OCRService
+from ai_service.modules.biometric.biometric_service import BiometricService
+from ai_service.modules.behavioral.behavioral_service import BehavioralService
+from ai_service.modules.risk_engine.risk_service import RiskEngine
+
+app = Flask(__name__)
+UPLOAD_FOLDER = 'temp_uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+# Initialize services once so model/reader setup is not repeated per request.
+ocr_service = OCRService()
+biometric_service = BiometricService()
+behavioral_service = BehavioralService()
+risk_engine = RiskEngine()
+
+def decode_data_url_frame(frame):
+    if not isinstance(frame, str):
+        return None
+    payload = re.sub(r"^data:image/[^;]+;base64,", "", frame)
+    try:
+        image_bytes = base64.b64decode(payload)
+        image_array = np.frombuffer(image_bytes, dtype=np.uint8)
+        return cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+def assess_liveness_frames(frames):
+    decoded_frames = [decode_data_url_frame(frame) for frame in frames]
+    decoded_frames = [frame for frame in decoded_frames if frame is not None]
+
+    if len(decoded_frames) < 8:
+        return {
+            "passed": False,
+            "liveness_score": 0,
+            "face_detected": False,
+            "motion_detected": False,
+            "blink_or_eye_motion_detected": False,
+            "head_motion_detected": False,
+            "reason": "Not enough live frames were captured.",
+        }
+
+    face_cascade = cv2.CascadeClassifier(
+        os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+    )
+
+    face_boxes = []
+    motion_values = []
+    eye_region_values = []
+
+    previous_gray = None
+    for frame in decoded_frames:
+        resized = cv2.resize(frame, (320, 240))
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        gray = cv2.equalizeHist(gray)
+
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(55, 55))
+        if len(faces) > 0:
+            face = max(faces, key=lambda box: box[2] * box[3])
+            face_boxes.append(tuple(int(value) for value in face))
+            x, y, w, h = face
+            eye_region = gray[y + int(h * 0.18): y + int(h * 0.48), x: x + w]
+            if eye_region.size:
+                eye_region_values.append(float(np.std(eye_region)))
+
+        if previous_gray is not None:
+            diff = cv2.absdiff(gray, previous_gray)
+            motion_values.append(float(np.mean(diff)))
+        previous_gray = gray
+
+    face_ratio = len(face_boxes) / len(decoded_frames)
+    average_motion = float(np.mean(motion_values)) if motion_values else 0.0
+    eye_variation = float(np.std(eye_region_values)) if len(eye_region_values) > 1 else 0.0
+
+    centers = [(x + w / 2, y + h / 2) for x, y, w, h in face_boxes]
+    head_motion = 0.0
+    if len(centers) > 1:
+        xs = [center[0] for center in centers]
+        ys = [center[1] for center in centers]
+        head_motion = max(max(xs) - min(xs), max(ys) - min(ys))
+
+    face_detected = face_ratio >= 0.45
+    motion_detected = 2.0 <= average_motion <= 45.0
+    blink_or_eye_motion_detected = eye_variation >= 1.2
+    head_motion_detected = head_motion >= 6.0
+
+    score = 0
+    if face_detected:
+        score += 35
+    if motion_detected:
+        score += 25
+    if blink_or_eye_motion_detected:
+        score += 20
+    if head_motion_detected:
+        score += 20
+
+    passed = score >= 70
+    failed_reasons = []
+    if not face_detected:
+        failed_reasons.append("face was not consistently detected")
+    if not motion_detected:
+        failed_reasons.append("natural frame motion was not detected")
+    if not blink_or_eye_motion_detected:
+        failed_reasons.append("eye-region motion was too low")
+    if not head_motion_detected:
+        failed_reasons.append("head movement was too low")
+
+    return {
+        "passed": passed,
+        "liveness_score": score,
+        "face_detected": face_detected,
+        "motion_detected": motion_detected,
+        "blink_or_eye_motion_detected": blink_or_eye_motion_detected,
+        "head_motion_detected": head_motion_detected,
+        "frame_count": len(decoded_frames),
+        "face_detection_ratio": round(face_ratio, 2),
+        "average_motion": round(average_motion, 2),
+        "eye_variation": round(eye_variation, 2),
+        "head_motion": round(head_motion, 2),
+        "reason": "Live face motion verified." if passed else "Liveness failed: " + ", ".join(failed_reasons) + ".",
+    }
+
+@app.route('/api/liveness/check', methods=['POST'])
+def check_liveness():
+    payload = request.get_json(silent=True) or {}
+    frames = payload.get("frames") or []
+    result = assess_liveness_frames(frames)
+    return jsonify(result), 200
+
+@app.route('/api/verify', methods=['POST'])
+def verify_identity():
+    if 'document_image' not in request.files or 'selfie_image' not in request.files:
+        return jsonify({"error": "Missing image files"}), 400
+        
+    doc_file = request.files['document_image']
+    selfie_file = request.files['selfie_image']
+    
+    doc_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(doc_file.filename))
+    selfie_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(selfie_file.filename))
+    doc_file.save(doc_path)
+    selfie_file.save(selfie_path)
+
+    ip_change = request.form.get('ip_change_detected', 'false').lower() == 'true'
+    freq = int(request.form.get('request_frequency', 1))
+    behavior_meta = {"ip_change_detected": ip_change, "request_frequency": freq}
+
+    try:
+        ocr_result = ocr_service.extract_and_validate(doc_path)
+        bio_result = biometric_service.verify_identity(doc_path, selfie_path)
+        behavior_result = behavioral_service.evaluate_behavior(behavior_meta)
+        
+        biometric_conf = bio_result["biometric_confidence"]
+        ocr_const = ocr_result["ocr_consistency_score"]
+        behavioral_score = behavior_result["behavioral_score"]
+        
+        final_risk = risk_engine.assess_risk(biometric_conf, ocr_const, behavioral_score)
+        
+        return jsonify({
+            "status": "success",
+            "ocr_analysis": ocr_result,
+            "biometric_analysis": bio_result,
+            "behavioral_analysis": behavior_result,
+            "fraud_risk_assessment": final_risk
+        }), 200
+
+    except Exception as e:
+        return jsonify({"status": "failed", "error": str(e)}), 500
+        
+    finally:
+        if os.path.exists(doc_path):
+            os.remove(doc_path)
+        if os.path.exists(selfie_path):
+            os.remove(selfie_path)
+
+if __name__ == '__main__':
+    # Run Python service on Port 8000
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8000)))
