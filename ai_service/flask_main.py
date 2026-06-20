@@ -22,11 +22,24 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 DOCUMENT_FACE_FOLDER = os.path.join(UPLOAD_FOLDER, 'document_faces')
 os.makedirs(DOCUMENT_FACE_FOLDER, exist_ok=True)
 
-# Initialize services once so model/reader setup is not repeated per request.
-ocr_service = OCRService()
-biometric_service = BiometricService()
-behavioral_service = BehavioralService()
-risk_engine = RiskEngine()
+ocr_service = None
+biometric_service = None
+behavioral_service = None
+risk_engine = None
+
+def get_services():
+    global ocr_service, biometric_service, behavioral_service, risk_engine
+
+    if ocr_service is None:
+        ocr_service = OCRService()
+    if biometric_service is None:
+        biometric_service = BiometricService()
+    if behavioral_service is None:
+        behavioral_service = BehavioralService()
+    if risk_engine is None:
+        risk_engine = RiskEngine()
+
+    return ocr_service, biometric_service, behavioral_service, risk_engine
 
 def decode_data_url_frame(frame):
     if not isinstance(frame, str):
@@ -185,6 +198,8 @@ def verify_identity():
     behavior_meta = {"ip_change_detected": ip_change, "request_frequency": freq}
 
     try:
+        ocr_service, biometric_service, behavioral_service, risk_engine = get_services()
+
         ocr_result = ocr_service.extract_and_validate(doc_path)
         document_face_result = ocr_service.extract_document_face(doc_path, DOCUMENT_FACE_FOLDER)
         forgery_result = ocr_service.analyze_forgery(doc_path)
