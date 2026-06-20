@@ -9,12 +9,6 @@ from werkzeug.utils import secure_filename
 import cv2
 import numpy as np
 
-# Corrected imports for 'ai_service' folder [8]
-from ai_service.modules.ocr.ocr_service import OCRService
-from ai_service.modules.biometric.biometric_service import BiometricService
-from ai_service.modules.behavioral.behavioral_service import BehavioralService
-from ai_service.modules.risk_engine.risk_service import RiskEngine
-
 app = Flask(__name__)
 UPLOAD_FOLDER = 'temp_uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -29,6 +23,11 @@ risk_engine = None
 
 def get_services():
     global ocr_service, biometric_service, behavioral_service, risk_engine
+
+    from ai_service.modules.ocr.ocr_service import OCRService
+    from ai_service.modules.biometric.biometric_service import BiometricService
+    from ai_service.modules.behavioral.behavioral_service import BehavioralService
+    from ai_service.modules.risk_engine.risk_service import RiskEngine
 
     if ocr_service is None:
         ocr_service = OCRService()
