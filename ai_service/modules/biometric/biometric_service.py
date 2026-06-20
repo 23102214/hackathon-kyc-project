@@ -39,13 +39,18 @@ class BiometricService:
             return True, "Liveness check passed (placeholder)"
         return False, "Image not found"
 
-    def verify_identity(self, document_image_path, selfie_image_path):
-        is_verified, result = self.verify_face(document_image_path, selfie_image_path)
+    def verify_identity(self, document_image_path, selfie_image_path, document_face_path=None):
+        comparison_image_path = document_face_path or document_image_path
+        is_verified, result = self.verify_face(comparison_image_path, selfie_image_path)
         distance = result.get("distance")
         threshold = result.get("threshold", 0.68)
 
         if isinstance(distance, (int, float)) and threshold:
-            confidence = max(0, min(1, 1 - (distance / threshold)))
+            distance_ratio = distance / threshold
+            if is_verified:
+                confidence = 0.8 + (max(0, 1 - distance_ratio) * 0.2)
+            else:
+                confidence = min(0.79, 0.79 / max(distance_ratio, 1))
         else:
             confidence = 1.0 if is_verified else 0.0
 
@@ -54,5 +59,6 @@ class BiometricService:
             "biometric_confidence": round(confidence, 3),
             "cosine_distance": distance,
             "model": self.model_name,
+            "comparison_source": "document_face_crop" if document_face_path else "document_image",
             "details": result,
         }

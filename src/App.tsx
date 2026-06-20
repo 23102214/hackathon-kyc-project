@@ -6,7 +6,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Activity,
-  ArrowRight,
   BarChart3,
   BrainCircuit,
   CheckCircle2,
@@ -35,7 +34,6 @@ type TabId = "home" | "login" | "onboard" | "admin" | "streams" | "blueprints";
 
 const navItems: Array<{ id: TabId; label: string }> = [
   { id: "home", label: "Features" },
-  { id: "onboard", label: "Demo" },
   { id: "admin", label: "Review" },
   { id: "streams", label: "Monitoring" },
   { id: "blueprints", label: "Blueprints" },
@@ -45,6 +43,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("home");
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [requests, setRequests] = useState<OnboardingRequest[]>([]);
+  const [requestLoadError, setRequestLoadError] = useState("");
   const [accountRole, setAccountRole] = useState<"guest" | "customer" | "admin">("guest");
   const isAdmin = accountRole === "admin";
 
@@ -78,17 +77,21 @@ export default function App() {
       }
 
       try {
+        setRequestLoadError("");
         const { data } = await supabase.auth.getSession();
         const token = data.session?.access_token;
         const response = await fetch("/api/onboard/requests", {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
         const payload = await response.json();
-        if (payload.success) {
-          setRequests(payload.requests || []);
+        if (!response.ok || !payload.success) {
+          setRequestLoadError(payload.error || "Could not load saved verification reports.");
+          return;
         }
+        setRequests(payload.requests || []);
       } catch (error) {
         console.warn("Could not load API-backed requests.", error);
+        setRequestLoadError("Could not reach the backend API to load saved verification reports.");
       }
     }
 
@@ -165,6 +168,70 @@ export default function App() {
     );
   };
 
+  const handleUpdateRequestData = async (id: string, dataPatch: Partial<OnboardingData>) => {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      const response = await fetch(`/api/onboard/requests/${id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ data: dataPatch }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.success) {
+        alert(payload.error || "Could not update request data.");
+        return false;
+      }
+
+      setRequests((prev) =>
+        prev.map((request) =>
+          request.id === id
+            ? {
+                ...request,
+                data: {
+                  ...request.data,
+                  ...dataPatch,
+                },
+              }
+            : request,
+        ),
+      );
+      return true;
+    } catch (error) {
+      console.warn("Could not update request data.", error);
+      alert("Could not reach backend API to update request data.");
+      return false;
+    }
+  };
+
+  const handleDeleteRequest = async (id: string) => {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      const response = await fetch(`/api/onboard/requests/${id}`, {
+        method: "DELETE",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.success) {
+        alert(payload.error || "Could not delete request.");
+        return false;
+      }
+
+      setRequests((prev) => prev.filter((request) => request.id !== id));
+      return true;
+    } catch (error) {
+      console.warn("Could not delete request.", error);
+      alert("Could not reach backend API to delete request.");
+      return false;
+    }
+  };
+
   const selectTab = (tab: TabId) => {
     setActiveTab(tab);
     setIsMobileMenuOpen(false);
@@ -173,21 +240,27 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-teal-100 selection:text-teal-900">
       <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
-        <div className="mx-auto flex h-17 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
-          <button
-            onClick={() => selectTab("home")}
-            className="flex items-center gap-3 rounded-lg text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
-          >
-            <span className="flex h-10 w-10 items-center justify-center rounded-lg border border-teal-200 bg-teal-50 text-teal-700">
+        <div className="mx-auto flex min-h-24 max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
+          <div className="flex items-start gap-3">
+            <button
+              onClick={() => selectTab("home")}
+              className="flex h-10 w-10 items-center justify-center rounded-lg border border-teal-200 bg-teal-50 text-teal-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+              aria-label="Go to home"
+            >
               <Shield className="h-5 w-5" />
-            </span>
-            <span>
-              <span className="block text-lg font-extrabold tracking-tight">Smart eKYC</span>
-              <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                Identity intelligence
-              </span>
-            </span>
-          </button>
+            </button>
+            <div>
+              <button
+                onClick={() => selectTab("home")}
+                className="block rounded text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+              >
+                <span className="block text-lg font-extrabold tracking-tight">Smart eKYC</span>
+                <span className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  Identity intelligence
+                </span>
+              </button>
+            </div>
+          </div>
 
           <nav className="hidden items-center gap-2 md:flex">
             {navItems
@@ -206,21 +279,6 @@ export default function App() {
                 </button>
               ))}
           </nav>
-
-          <div className="hidden items-center gap-2 md:flex">
-            <button
-              onClick={() => selectTab("login")}
-              className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
-            >
-              Sign In
-            </button>
-            <button
-              onClick={() => selectTab("onboard")}
-              className="rounded-lg bg-teal-600 px-4 py-2 text-sm font-bold text-white shadow-sm shadow-teal-100 transition hover:bg-teal-700"
-            >
-              Start KYC
-            </button>
-          </div>
 
           <button
             onClick={() => setIsMobileMenuOpen((open) => !open)}
@@ -263,40 +321,16 @@ export default function App() {
               <h1 className="max-w-5xl text-4xl font-black tracking-tight text-slate-950 sm:text-6xl lg:text-7xl">
                 Smart eKYC & Behavioral Identity Intelligence Platform
               </h1>
+              <button
+                onClick={() => selectTab("login")}
+                className="mt-7 rounded-lg border border-slate-200 bg-white px-5 py-3 text-sm font-bold text-slate-800 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+              >
+                Sign In
+              </button>
               <p className="mt-6 max-w-3xl text-base leading-8 text-slate-600 sm:text-lg">
                 Enterprise-grade identity verification with document checks, biometric risk analysis, behavioral
                 signals, and a human review console for financial onboarding teams.
               </p>
-              <div className="mt-9 flex flex-wrap justify-center gap-3">
-                <button
-                  onClick={() => selectTab("onboard")}
-                  className="inline-flex items-center gap-2 rounded-lg bg-teal-600 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-teal-100 transition hover:bg-teal-700"
-                >
-                  Start Demo Onboarding <ArrowRight className="h-4 w-4" />
-                </button>
-                <button
-                  onClick={() => selectTab(isAdmin ? "admin" : "login")}
-                  className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-5 py-3 text-sm font-bold text-slate-800 shadow-sm transition hover:bg-slate-50"
-                >
-                  <BarChart3 className="h-4 w-4" /> View Review Console
-                </button>
-              </div>
-            </section>
-
-            <section className="border-y border-slate-200 bg-white">
-              <div className="mx-auto grid max-w-7xl grid-cols-2 gap-4 px-4 py-10 text-center sm:px-6 lg:grid-cols-4 lg:px-8">
-                {[
-                  { value: requestSummary.total || "0", label: "API-backed applications" },
-                  { value: requestSummary.review || "0", label: "Cases in review" },
-                  { value: requestSummary.approved || "0", label: "Approved decisions" },
-                  { value: `${requestSummary.completionRate}%`, label: "Approval share" },
-                ].map((metric) => (
-                  <div key={metric.label} className="rounded-lg border border-slate-100 bg-slate-50 px-4 py-6">
-                    <div className="text-3xl font-black text-teal-700">{metric.value}</div>
-                    <div className="mt-1 text-sm font-medium text-slate-500">{metric.label}</div>
-                  </div>
-                ))}
-              </div>
             </section>
 
             <section className="mx-auto max-w-7xl px-4 py-18 sm:px-6 lg:px-8">
@@ -436,7 +470,17 @@ export default function App() {
 
         {activeTab === "admin" && isAdmin && (
           <section className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-            <AdminDashboard requests={requests} onUpdateRequestStatus={handleUpdateRequestStatus} />
+            {requestLoadError && (
+              <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-800">
+                {requestLoadError}
+              </div>
+            )}
+            <AdminDashboard
+              requests={requests}
+              onUpdateRequestStatus={handleUpdateRequestStatus}
+              onUpdateRequestData={handleUpdateRequestData}
+              onDeleteRequest={handleDeleteRequest}
+            />
           </section>
         )}
 

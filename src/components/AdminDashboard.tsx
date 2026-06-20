@@ -11,23 +11,28 @@ import {
   Check,
   CheckCircle2,
   Clock3,
+  Edit3,
   FileCheck2,
   FileSearch,
   Fingerprint,
   Mail,
-  MapPin,
+  Network,
   Phone,
   Search,
   ShieldAlert,
   ShieldCheck,
+  Save,
+  Trash2,
   User,
   X,
 } from "lucide-react";
-import { OnboardingRequest } from "../types";
+import { OnboardingData, OnboardingRequest } from "../types";
 
 interface AdminDashboardProps {
   requests: OnboardingRequest[];
   onUpdateRequestStatus: (id: string, newStatus: "APPROVED" | "REJECTED" | "HELD_FOR_REVIEW") => void;
+  onUpdateRequestData: (id: string, data: Partial<OnboardingData>) => Promise<boolean>;
+  onDeleteRequest: (id: string) => Promise<boolean>;
 }
 
 type QueueFilter = "ALL" | "REVIEW" | "APPROVED" | "REJECTED";
@@ -51,11 +56,99 @@ function formatPercent(value: number) {
   return `${Math.max(0, Math.min(100, Math.round(value)))}%`;
 }
 
-export default function AdminDashboard({ requests, onUpdateRequestStatus }: AdminDashboardProps) {
+function shortUserName(request: OnboardingRequest | null, fallback: string) {
+  if (!request?.data.fullName) return fallback;
+  const [firstName, secondName] = request.data.fullName.trim().split(/\s+/);
+  return [firstName, secondName].filter(Boolean).join(" ");
+}
+
+function buildFraudGraph(current: OnboardingRequest, requests: OnboardingRequest[]) {
+  const currentDeviceId = current.result.deviceFingerprint.deviceId;
+  const currentPhone = (current.data.phone || "").trim();
+  const currentIp = current.result.deviceFingerprint.ip;
+  const linkedRequests = new Map<
+    string,
+    {
+      request: OnboardingRequest;
+      reasons: string[];
+      details: string[];
+    }
+  >();
+
+  requests.forEach((request) => {
+    if (request.id === current.id) return;
+
+    const reasons: string[] = [];
+    const details: string[] = [];
+    if (currentDeviceId && request.result.deviceFingerprint.deviceId === currentDeviceId) {
+      reasons.push("Same Device");
+      details.push(currentDeviceId);
+    }
+    if (currentPhone && request.data.phone.trim() === currentPhone) {
+      reasons.push("Same Phone");
+      details.push(currentPhone);
+    }
+    if (currentIp && request.result.deviceFingerprint.ip === currentIp) {
+      reasons.push("Same IP");
+      details.push(currentIp);
+    }
+
+    if (reasons.length > 0) {
+      linkedRequests.set(request.id, { request, reasons, details });
+    }
+  });
+
+  const liveLinks = Array.from(linkedRequests.values()).sort((first, second) => {
+    if (second.reasons.length !== first.reasons.length) return second.reasons.length - first.reasons.length;
+    return second.request.result.riskRating.overallScore - first.request.result.riskRating.overallScore;
+  });
+
+  return {
+    nodes: [
+      {
+        key: "A",
+        title: "User A",
+        label: shortUserName(current, "Primary applicant"),
+        meta: current.result.deviceFingerprint.deviceId,
+        tone: "border-teal-200 bg-teal-50 text-teal-800",
+      },
+      ...liveLinks.map((link, index) => ({
+        key: String.fromCharCode(66 + index),
+        title: `User ${String.fromCharCode(66 + index)}`,
+        label: shortUserName(link.request, "Matched applicant"),
+        meta: link.request.id,
+        tone:
+          link.reasons.length > 1
+            ? "border-rose-200 bg-rose-50 text-rose-800"
+            : "border-amber-200 bg-amber-50 text-amber-800",
+      })),
+    ],
+    edges: liveLinks.map((link) => ({
+      label: link.reasons.join(" + "),
+      detail: link.details.join(" | "),
+      active: true,
+    })),
+    summary: {
+      sameDevice: requests.filter(
+        (request) => request.id !== current.id && Boolean(currentDeviceId) && request.result.deviceFingerprint.deviceId === currentDeviceId,
+      ).length,
+      samePhone: requests.filter(
+        (request) => request.id !== current.id && Boolean(currentPhone) && request.data.phone.trim() === currentPhone,
+      ).length,
+      sameIp: requests.filter(
+        (request) => request.id !== current.id && Boolean(currentIp) && request.result.deviceFingerprint.ip === currentIp,
+      ).length,
+    },
+  };
+}
+
+export default function AdminDashboard({ requests, onUpdateRequestStatus, onUpdateRequestData, onDeleteRequest }: AdminDashboardProps) {
   const [selectedRequest, setSelectedRequest] = useState<OnboardingRequest | null>(requests[0] || null);
   const [filter, setFilter] = useState<QueueFilter>("ALL");
   const [search, setSearch] = useState("");
   const [showDetail, setShowDetail] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editData, setEditData] = useState<Partial<OnboardingData>>({});
 
   useEffect(() => {
     setSelectedRequest((current) => {
@@ -99,6 +192,34 @@ export default function AdminDashboard({ requests, onUpdateRequestStatus }: Admi
     ? requests.find((request) => request.id === selectedRequest.id) || selectedRequest
     : null;
 
+  useEffect(() => {
+    if (!currentSelection) return;
+    setEditData({
+      fullName: currentSelection.data.fullName,
+      email: currentSelection.data.email,
+      phone: currentSelection.data.phone,
+      dob: currentSelection.data.dob,
+      documentType: currentSelection.data.documentType,
+    });
+  }, [currentSelection?.id]);
+
+  const saveProfileEdits = async () => {
+    if (!currentSelection) return;
+    const saved = await onUpdateRequestData(currentSelection.id, editData);
+    if (saved) setIsEditing(false);
+  };
+
+  const deleteCurrentRequest = async () => {
+    if (!currentSelection) return;
+    const confirmed = window.confirm(`Delete KYC request ${currentSelection.id}? This removes the verification record from Supabase.`);
+    if (!confirmed) return;
+    const deleted = await onDeleteRequest(currentSelection.id);
+    if (deleted) {
+      setShowDetail(false);
+      setSelectedRequest(null);
+    }
+  };
+
   const metrics = [
     { label: "Total Applications", value: summary.total, icon: BarChart3, tone: "bg-teal-50 text-teal-700" },
     { label: "Approved", value: summary.approved, icon: CheckCircle2, tone: "bg-emerald-50 text-emerald-700" },
@@ -109,6 +230,7 @@ export default function AdminDashboard({ requests, onUpdateRequestStatus }: Admi
 
   if (showDetail && currentSelection) {
     const risk = currentSelection.result.riskRating.overallScore;
+    const fraudGraph = buildFraudGraph(currentSelection, requests);
     const componentScores = [
       { label: "Document OCR", value: currentSelection.result.ocrData.ocrConfidence },
       { label: "Face Match", value: currentSelection.result.faceVerification.similarityPercentage },
@@ -148,6 +270,18 @@ export default function AdminDashboard({ requests, onUpdateRequestStatus }: Admi
             </div>
           </div>
           <div className="flex gap-2">
+            <button
+              onClick={() => setIsEditing((value) => !value)}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50"
+            >
+              <Edit3 className="h-4 w-4" /> Edit
+            </button>
+            <button
+              onClick={deleteCurrentRequest}
+              className="inline-flex items-center gap-2 rounded-lg border border-rose-200 bg-white px-4 py-2 text-sm font-bold text-rose-700 hover:bg-rose-50"
+            >
+              <Trash2 className="h-4 w-4" /> Delete
+            </button>
             <button
               onClick={() => onUpdateRequestStatus(currentSelection.id, "REJECTED")}
               className="inline-flex items-center gap-2 rounded-lg border border-rose-200 bg-white px-4 py-2 text-sm font-bold text-rose-700 hover:bg-rose-50"
@@ -229,6 +363,75 @@ export default function AdminDashboard({ requests, onUpdateRequestStatus }: Admi
             </section>
 
             <section className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h2 className="flex items-center gap-2 text-lg font-black text-slate-950">
+                    <Network className="h-5 w-5 text-teal-700" /> Fraud Network Graph
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Admin-only view of identity links across device and phone signals.
+                  </p>
+                </div>
+                <span className={`w-fit rounded-full px-3 py-1 text-xs font-bold ${currentSelection.result.syntheticIdentityRisk.syntheticDetected ? "bg-rose-50 text-rose-700" : "bg-teal-50 text-teal-700"}`}>
+                  Graph risk {formatPercent(currentSelection.result.syntheticIdentityRisk.graphRiskScore)}
+                </span>
+              </div>
+
+              <div className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,1fr)_220px]">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                  <div className="grid gap-3">
+                    {fraudGraph.nodes.map((node, index) => (
+                      <React.Fragment key={node.key}>
+                        <div className={`rounded-lg border p-4 ${node.tone}`}>
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <div className="text-xs font-black uppercase tracking-wide opacity-70">{node.title}</div>
+                              <div className="mt-1 text-base font-black">{node.label}</div>
+                            </div>
+                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/80 text-sm font-black shadow-sm">
+                              {node.key}
+                            </div>
+                          </div>
+                          <div className="mt-2 truncate text-xs font-semibold opacity-70">{node.meta}</div>
+                        </div>
+                        {fraudGraph.edges[index] && (
+                          <div className="ml-6 grid grid-cols-[18px_1fr] gap-3">
+                            <div className={`mx-auto h-16 w-px ${fraudGraph.edges[index].active ? "bg-amber-400" : "bg-slate-200"}`} />
+                            <div className="flex items-center">
+                              <span className={`rounded-md border px-3 py-2 text-xs font-black ${fraudGraph.edges[index].active ? "border-amber-200 bg-white text-amber-700" : "border-slate-200 bg-white text-slate-500"}`}>
+                                {fraudGraph.edges[index].label}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                      </React.Fragment>
+                    ))}
+                    {fraudGraph.edges.length === 0 && (
+                      <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm font-semibold text-slate-500">
+                        No live linked users found in the current onboarding records.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid gap-3">
+                  <div className="rounded-lg border border-slate-200 bg-white p-4">
+                    <div className="text-sm font-black text-slate-950">Same Device Users</div>
+                    <div className="mt-2 text-2xl font-black text-teal-700">{fraudGraph.summary.sameDevice}</div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-white p-4">
+                    <div className="text-sm font-black text-slate-950">Same Phone Users</div>
+                    <div className="mt-2 text-2xl font-black text-teal-700">{fraudGraph.summary.samePhone}</div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-white p-4">
+                    <div className="text-sm font-black text-slate-950">Shared IP Links</div>
+                    <div className="mt-2 text-2xl font-black text-teal-700">{fraudGraph.summary.sameIp}</div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
               <div className="mb-5 flex items-center justify-between">
                 <h2 className="flex items-center gap-2 text-lg font-black text-slate-950">
                   <FileSearch className="h-5 w-5 text-teal-700" /> Document Verification
@@ -248,6 +451,12 @@ export default function AdminDashboard({ requests, onUpdateRequestStatus }: Admi
                     <div className="flex justify-between gap-4">
                       <dt className="text-slate-500">Document</dt>
                       <dd className="font-bold text-slate-900">{currentSelection.result.ocrData.docNumberExtracted || "Not extracted"}</dd>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-slate-500">Doc match</dt>
+                      <dd className="font-bold text-slate-900">
+                        {currentSelection.result.ocrData.matchScores.docNumberMatch ? "Yes" : "No"}
+                      </dd>
                     </div>
                     <div className="flex justify-between gap-4">
                       <dt className="text-slate-500">DOB</dt>
@@ -283,6 +492,45 @@ export default function AdminDashboard({ requests, onUpdateRequestStatus }: Admi
                       <div className="text-xs font-medium text-slate-500">Blink Events</div>
                     </div>
                   </div>
+                  <div className="mt-5 grid gap-4 md:grid-cols-[140px_1fr]">
+                    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+                      {currentSelection.result.faceVerification.documentFaceCropDataUrl ? (
+                        <img
+                          src={currentSelection.result.faceVerification.documentFaceCropDataUrl}
+                          alt="Cropped document face"
+                          className="aspect-square w-full object-cover"
+                        />
+                      ) : (
+                        <div className="flex aspect-square items-center justify-center px-3 text-center text-xs font-bold text-slate-400">
+                          No crop
+                        </div>
+                      )}
+                    </div>
+                    <dl className="grid gap-3 text-sm sm:grid-cols-2">
+                      <div>
+                        <dt className="text-slate-500">Document face extracted</dt>
+                        <dd className="font-bold text-slate-900">
+                          {currentSelection.result.faceVerification.documentFaceDetected ? "Yes" : "No"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-slate-500">Crop confidence</dt>
+                        <dd className="font-bold text-slate-900">
+                          {formatPercent(currentSelection.result.faceVerification.documentFaceConfidence || 0)}
+                        </dd>
+                      </div>
+                      <div className="sm:col-span-2">
+                        <dt className="text-slate-500">Comparison source</dt>
+                        <dd className="font-bold text-slate-900">
+                          {currentSelection.result.faceVerification.comparisonSource === "document_face_crop"
+                            ? "Stored document face crop"
+                            : currentSelection.result.faceVerification.comparisonSource === "document_face_crop_missing"
+                              ? "Document face crop missing"
+                            : "Full document image"}
+                        </dd>
+                      </div>
+                    </dl>
+                  </div>
                 </div>
               </div>
             </section>
@@ -316,33 +564,71 @@ export default function AdminDashboard({ requests, onUpdateRequestStatus }: Admi
 
           <aside className="space-y-6">
             <section className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-              <h2 className="flex items-center gap-2 text-lg font-black text-slate-950">
-                <User className="h-5 w-5 text-slate-500" /> Applicant Information
-              </h2>
-              <dl className="mt-5 space-y-4 text-sm">
-                <div>
-                  <dt className="text-slate-500">Full Name</dt>
-                  <dd className="mt-1 font-bold text-slate-950">{currentSelection.data.fullName || "Not provided"}</dd>
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="flex items-center gap-2 text-lg font-black text-slate-950">
+                  <User className="h-5 w-5 text-slate-500" /> Applicant Information
+                </h2>
+                {isEditing && (
+                  <button
+                    onClick={saveProfileEdits}
+                    className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-xs font-bold text-white hover:bg-slate-700"
+                  >
+                    <Save className="h-3.5 w-3.5" /> Save
+                  </button>
+                )}
+              </div>
+              {isEditing ? (
+                <div className="mt-5 space-y-3">
+                  {[
+                    ["fullName", "Full Name", "text"],
+                    ["email", "Email", "email"],
+                    ["phone", "Phone", "tel"],
+                    ["dob", "Date of Birth", "date"],
+                  ].map(([field, label, type]) => (
+                    <label key={field} className="block text-sm">
+                      <span className="font-bold text-slate-600">{label}</span>
+                      <input
+                        type={type}
+                        value={(editData[field as keyof OnboardingData] as string) || ""}
+                        onChange={(event) => setEditData((current) => ({ ...current, [field]: event.target.value }))}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-teal-500 focus:bg-white"
+                      />
+                    </label>
+                  ))}
+                  <label className="block text-sm">
+                    <span className="font-bold text-slate-600">Document Type</span>
+                    <select
+                      value={editData.documentType || currentSelection.data.documentType}
+                      onChange={(event) => setEditData((current) => ({ ...current, documentType: event.target.value as OnboardingData["documentType"] }))}
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-teal-500 focus:bg-white"
+                    >
+                      <option value="passport">Passport</option>
+                      <option value="aadhaar">Aadhaar</option>
+                      <option value="pan">PAN</option>
+                      <option value="driver_license">Driver License</option>
+                    </select>
+                  </label>
                 </div>
-                <div>
-                  <dt className="text-slate-500">Email</dt>
-                  <dd className="mt-1 flex items-center gap-2 font-bold text-slate-950">
-                    <Mail className="h-4 w-4 text-slate-400" /> {currentSelection.data.email || "Not provided"}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-slate-500">Phone</dt>
-                  <dd className="mt-1 flex items-center gap-2 font-bold text-slate-950">
-                    <Phone className="h-4 w-4 text-slate-400" /> {currentSelection.data.phone || "Not provided"}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-slate-500">Address</dt>
-                  <dd className="mt-1 flex items-start gap-2 font-bold text-slate-950">
-                    <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" /> {currentSelection.data.address || "Not provided"}
-                  </dd>
-                </div>
-              </dl>
+              ) : (
+                <dl className="mt-5 space-y-4 text-sm">
+                  <div>
+                    <dt className="text-slate-500">Full Name</dt>
+                    <dd className="mt-1 font-bold text-slate-950">{currentSelection.data.fullName || "Not provided"}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-500">Email</dt>
+                    <dd className="mt-1 flex items-center gap-2 font-bold text-slate-950">
+                      <Mail className="h-4 w-4 text-slate-400" /> {currentSelection.data.email || "Not provided"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-500">Phone</dt>
+                    <dd className="mt-1 flex items-center gap-2 font-bold text-slate-950">
+                      <Phone className="h-4 w-4 text-slate-400" /> {currentSelection.data.phone || "Not provided"}
+                    </dd>
+                  </div>
+                </dl>
+              )}
             </section>
 
             <section className="rounded-lg border border-teal-100 bg-teal-50 p-6">
@@ -517,6 +803,11 @@ export default function AdminDashboard({ requests, onUpdateRequestStatus }: Admi
 
       <div className="grid gap-4 md:grid-cols-3">
         {[
+          {
+            icon: Network,
+            title: "Fraud Network Graph",
+            text: "Trace linked applicants by shared devices, phone numbers, and identity graph risk.",
+          },
           {
             icon: Fingerprint,
             title: "Behavioral Analysis",

@@ -183,6 +183,13 @@ function toRequestStatus(verdict: "APPROVED" | "REJECTED" | "MANUAL_REVIEW") {
   return verdict === "APPROVED" ? "APPROVED" : verdict === "REJECTED" ? "REJECTED" : "HELD_FOR_REVIEW";
 }
 
+function toAccountStatus(status: "PENDING" | "APPROVED" | "REJECTED" | "HELD_FOR_REVIEW") {
+  if (status === "APPROVED") return "ACTIVE";
+  if (status === "REJECTED") return "REJECTED";
+  if (status === "HELD_FOR_REVIEW") return "REVIEW_LOCKED";
+  return "PENDING_KYC";
+}
+
 function calculateHumanConfidence(telemetry: any) {
   const typingSpeed = telemetry?.typingSpeed || 0;
   const mouseSpeed = telemetry?.mouseSpeed || 0;
@@ -190,6 +197,128 @@ function calculateHumanConfidence(telemetry: any) {
   const mousePenalty = mouseSpeed > 0 && mouseSpeed < 700 ? 0 : mouseSpeed ? 10 : 4;
 
   return Math.max(55, Math.min(100, 100 - typingPenalty - mousePenalty));
+}
+
+function toRiskRating(score: number) {
+  if (score >= 85) return "CRITICAL";
+  if (score >= 65) return "HIGH";
+  if (score >= 35) return "MEDIUM";
+  return "LOW";
+}
+
+function clampRiskScore(score: number) {
+  return Math.max(0, Math.min(100, Math.round(Number(score) || 0)));
+}
+
+function compactVerificationResult(result: any) {
+  if (!result || typeof result !== "object") return result;
+  return {
+    ...result,
+    faceVerification: result.faceVerification
+      ? {
+          ...result.faceVerification,
+          documentFaceCropDataUrl: null,
+        }
+      : result.faceVerification,
+  };
+}
+
+function alertSeverity(score: number) {
+  return toRiskRating(score);
+}
+
+async function safeSupabaseSideEffect(label: string, task: () => Promise<any>) {
+  try {
+    return await task();
+  } catch (error: any) {
+    console.error(`${label} failed:`, error?.message || error);
+    return null;
+  }
+}
+
+function buildMonitoringAssessment(eventType: string, payload: any) {
+  let riskScore = Number(payload.riskScore || 0);
+  const amount = Number(payload.amount || 0);
+  const country = String(payload.country || "India");
+  const deviceChanged = Boolean(payload.deviceChanged);
+  const vpnDetected = Boolean(payload.vpnDetected);
+  const repeatedActivity = Boolean(payload.repeatedActivity);
+  const riskyReceiver = Boolean(payload.riskyReceiver);
+
+  if (eventType === "TRANSACTION") {
+    if (amount > 100000) riskScore += 35;
+    if (amount > 500000) riskScore += 25;
+    if (country.toLowerCase() !== "india") riskScore += 20;
+    if (repeatedActivity) riskScore += 15;
+  }
+
+  if (eventType === "LOGIN") {
+    if (deviceChanged) riskScore += 25;
+    if (vpnDetected) riskScore += 30;
+    if (country.toLowerCase() !== "india") riskScore += 20;
+  }
+
+  if (eventType === "AML_ALERT") {
+    riskScore += 55;
+    if (amount > 100000) riskScore += 20;
+    if (riskyReceiver) riskScore += 20;
+    if (country.toLowerCase() !== "india") riskScore += 15;
+  }
+
+  if (eventType === "FRAUD_ALERT" || eventType === "DEVICE_SWAP" || eventType === "GEOLOCATION_SWAP") {
+    riskScore += 45;
+    if (deviceChanged) riskScore += 20;
+    if (vpnDetected) riskScore += 20;
+    if (repeatedActivity) riskScore += 15;
+  }
+
+  if (eventType === "BEHAVIOR_DRIFT") {
+    riskScore += 50;
+    if (repeatedActivity) riskScore += 20;
+  }
+
+  riskScore = Math.max(0, Math.min(100, Math.round(riskScore)));
+  const riskRating = toRiskRating(riskScore);
+  const mitigationApplied = riskScore >= 85
+    ? "Blocked, account suspended, and escalated to fraud operations"
+    : riskScore >= 65
+      ? "Held for analyst review with account restrictions"
+      : riskScore >= 35
+        ? "Step-up verification required"
+        : "Allowed and logged";
+
+  return { riskScore, riskRating, mitigationApplied };
+}
+
+function buildAlertForEvent(eventType: string, riskScore: number, email: string) {
+  if (eventType === "AML_ALERT") {
+    return {
+      alertType: "AML_ALERT",
+      title: "AML monitoring alert",
+      message: `AML controls flagged ${email} with risk score ${riskScore}/100.`,
+      actionRequired: "Freeze high-risk transfer, collect beneficiary evidence, and route to compliance review.",
+    };
+  }
+
+  if (eventType === "FRAUD_ALERT" || riskScore >= 85) {
+    return {
+      alertType: "FRAUD_ALERT",
+      title: "Fraud detection alert",
+      message: `Fraud rules escalated ${email} with risk score ${riskScore}/100.`,
+      actionRequired: "Block the session, suspend account access, and request fresh verification.",
+    };
+  }
+
+  if (riskScore >= 65) {
+    return {
+      alertType: "RISK_ESCALATION",
+      title: "Risk escalation",
+      message: `Continuous monitoring raised ${email} to high risk.`,
+      actionRequired: "Apply step-up verification and analyst review before allowing sensitive actions.",
+    };
+  }
+
+  return null;
 }
 
 function dataUrlToBuffer(dataUrl?: string | null) {
@@ -225,6 +354,8 @@ function scoreNameMatch(inputName = "", extractedName = "", extractedText = "") 
 function dobAppearsInText(dob = "", extractedDob = "", extractedText = "") {
   if (!dob) return false;
   const [year, month, day] = dob.split("-");
+  const normalizedDob = [year, month, day].filter(Boolean).join("");
+  const normalizedTextDates = `${extractedDob} ${extractedText}`.replace(/[^0-9]/g, "");
   const candidates = [
     dob,
     `${day}/${month}/${year}`,
@@ -232,7 +363,95 @@ function dobAppearsInText(dob = "", extractedDob = "", extractedText = "") {
     `${year}/${month}/${day}`,
   ].filter(Boolean);
   const haystack = `${extractedDob} ${extractedText}`;
-  return candidates.some((candidate) => haystack.includes(candidate));
+  return candidates.some((candidate) => haystack.includes(candidate)) || normalizedTextDates.includes(normalizedDob);
+}
+
+function normalizeDocumentNumber(value = "") {
+  return value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function normalizeDocumentNumberForOcr(value = "") {
+  return normalizeDocumentNumber(value)
+    .replace(/[OQD]/g, "0")
+    .replace(/[IL|]/g, "1")
+    .replace(/S/g, "5")
+    .replace(/B/g, "8")
+    .replace(/Z/g, "2");
+}
+
+function normalizePanByPosition(value = "") {
+  const normalized = normalizeDocumentNumber(value);
+  if (normalized.length !== 10) return normalized;
+
+  const toLetter = (char: string) => char
+    .replace(/0/g, "O")
+    .replace(/1/g, "I")
+    .replace(/5/g, "S")
+    .replace(/8/g, "B")
+    .replace(/2/g, "Z");
+  const toDigit = (char: string) => char
+    .replace(/[OQD]/g, "0")
+    .replace(/[IL|]/g, "1")
+    .replace(/S/g, "5")
+    .replace(/B/g, "8")
+    .replace(/Z/g, "2");
+
+  return [
+    ...normalized.slice(0, 5).split("").map(toLetter),
+    ...normalized.slice(5, 9).split("").map(toDigit),
+    ...normalized.slice(9).split("").map(toLetter),
+  ].join("");
+}
+
+function extractDocumentNumberFromText(extractedText = "", documentType = "") {
+  const text = normalizeIdentityText(extractedText);
+  const patterns =
+    documentType === "aadhaar"
+      ? [/\b[0-9]{12}\b/]
+      : documentType === "pan"
+        ? [/\b[A-Z]{5}[0-9]{4}[A-Z]\b/]
+        : documentType === "passport"
+          ? [/\b[A-Z][0-9]{7}\b/]
+          : documentType === "driver_license"
+            ? [/\b[A-Z]{2}[0-9]{2}[0-9]{4,11}\b/]
+            : [];
+
+  const genericPatterns = [
+    /\b[A-Z]{5}[0-9]{4}[A-Z]\b/,
+    /\b[0-9]{12}\b/,
+    /\b[A-Z][0-9]{7}\b/,
+    /\b[A-Z]{2}[0-9]{2}[0-9]{4,11}\b/,
+    /\b(?:ID|NO|NUMBER|DOCUMENT|DL|LICENSE|PASSPORT|AADHAAR|PAN)\s+([A-Z0-9]{5,24})\b/,
+  ];
+
+  for (const pattern of [...patterns, ...genericPatterns]) {
+    const match = text.match(pattern);
+    if (match) return match[1] || match[0];
+  }
+
+  return "";
+}
+
+function documentNumberMatches(inputDocumentNumber = "", extractedDocumentNumber = "", extractedText = "") {
+  const input = normalizeDocumentNumber(inputDocumentNumber);
+  if (!input) return false;
+
+  const extracted = normalizeDocumentNumber(extractedDocumentNumber);
+  const text = normalizeDocumentNumber(extractedText);
+  const inputOcrSafe = normalizeDocumentNumberForOcr(input);
+  const extractedOcrSafe = normalizeDocumentNumberForOcr(extracted);
+  const textOcrSafe = normalizeDocumentNumberForOcr(text);
+  const inputPan = normalizePanByPosition(input);
+  const extractedPan = normalizePanByPosition(extracted);
+
+  return (
+    extracted === input ||
+    text.includes(input) ||
+    extractedOcrSafe === inputOcrSafe ||
+    textOcrSafe.includes(inputOcrSafe) ||
+    extractedPan === inputPan ||
+    text.includes(inputPan)
+  );
 }
 
 async function runPythonImageVerification(onboardingData: any, telemetry: any) {
@@ -258,6 +477,153 @@ async function runPythonImageVerification(onboardingData: any, telemetry: any) {
   });
 
   return response.data;
+}
+
+async function createRiskAlert(input: {
+  accountId?: string | null;
+  monitoringEventId?: string | null;
+  alertType: string;
+  severity: string;
+  title: string;
+  message: string;
+  actionRequired: string;
+}) {
+  if (!isSupabaseConfigured() || !input.accountId) return null;
+
+  const [alert] = await supabaseRequest<any[]>("risk_alerts", {
+    method: "POST",
+    body: JSON.stringify({
+      account_id: input.accountId,
+      monitoring_event_id: input.monitoringEventId || null,
+      alert_type: input.alertType,
+      severity: input.severity,
+      title: input.title,
+      message: input.message,
+      action_required: input.actionRequired,
+    }),
+  });
+
+  return alert;
+}
+
+async function updateAccountActivation(account: any, status: "PENDING" | "APPROVED" | "REJECTED" | "HELD_FOR_REVIEW", riskScore: number, reason: string) {
+  if (!isSupabaseConfigured() || !account?.id) return null;
+
+  const accountStatus = toAccountStatus(status);
+  const active = accountStatus === "ACTIVE";
+  const payload: any = {
+    account_status: accountStatus,
+    is_active: active,
+    latest_risk_score: clampRiskScore(riskScore),
+    latest_risk_rating: toRiskRating(riskScore),
+  };
+
+  if (active) {
+    payload.activated_at = new Date().toISOString();
+    payload.deactivated_at = null;
+  } else if (accountStatus === "REJECTED") {
+    payload.deactivated_at = new Date().toISOString();
+  }
+
+  const [updated] = await supabaseRequest<any[]>(`app_accounts?id=eq.${account.id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+
+  const actionTaken = active
+    ? "Account activated"
+    : accountStatus === "REVIEW_LOCKED"
+      ? "Account locked pending manual review"
+      : "Account rejected and access disabled";
+
+  await safeSupabaseSideEffect("Risk recalculation insert", () => supabaseRequest<any[]>("risk_recalculations", {
+    method: "POST",
+    body: JSON.stringify({
+      account_id: account.id,
+      previous_score: clampRiskScore(account.latest_risk_score || 0),
+      new_score: clampRiskScore(riskScore),
+      new_rating: toRiskRating(riskScore),
+      reason,
+      action_taken: actionTaken,
+    }),
+  }));
+
+  if (status !== "APPROVED") {
+    await safeSupabaseSideEffect("KYC alert insert", () => createRiskAlert({
+      accountId: account.id,
+      alertType: status === "REJECTED" ? "KYC_REJECTION" : "MANUAL_REVIEW",
+      severity: alertSeverity(riskScore),
+      title: status === "REJECTED" ? "KYC rejected" : "Manual review required",
+      message: `${account.email} completed KYC with ${riskScore}/100 risk. ${reason}`,
+      actionRequired: status === "REJECTED"
+        ? "Keep account disabled and request a new verified submission."
+        : "Review document, biometric, liveness, behavior, and device evidence before activation.",
+    }));
+  }
+
+  return updated;
+}
+
+async function recalculateRiskAfterMonitoring(account: any, event: any, payload: any) {
+  if (!isSupabaseConfigured() || !account?.id || !event?.id) return null;
+
+  const previousScore = clampRiskScore(account.latest_risk_score || 0);
+  const eventScore = clampRiskScore(event.risk_score);
+  const riskDrift = payload.repeatedActivity ? 8 : 0;
+  const newScore = clampRiskScore(Math.max(eventScore, Math.round(previousScore * 0.65 + eventScore * 0.35) + riskDrift));
+  const newRating = toRiskRating(newScore);
+  const shouldSuspend = newScore >= 85 || event.event_type === "FRAUD_ALERT";
+  const shouldRestrict = !shouldSuspend && (newScore >= 65 || event.event_type === "AML_ALERT");
+
+  const accountPatch: any = {
+    latest_risk_score: newScore,
+    latest_risk_rating: newRating,
+  };
+
+  let actionTaken = "Risk recalculated and account remains active";
+  if (shouldSuspend) {
+    accountPatch.account_status = "SUSPENDED";
+    accountPatch.is_active = false;
+    accountPatch.deactivated_at = new Date().toISOString();
+    actionTaken = "Account suspended and fraud action opened";
+  } else if (shouldRestrict) {
+    accountPatch.account_status = "REVIEW_LOCKED";
+    accountPatch.is_active = false;
+    actionTaken = "Account restricted pending analyst review";
+  }
+
+  await supabaseRequest<any[]>(`app_accounts?id=eq.${account.id}`, {
+    method: "PATCH",
+    body: JSON.stringify(accountPatch),
+  });
+
+  const [riskRecord] = await supabaseRequest<any[]>("risk_recalculations", {
+    method: "POST",
+    body: JSON.stringify({
+      account_id: account.id,
+      monitoring_event_id: event.id,
+      previous_score: previousScore,
+      new_score: newScore,
+      new_rating: newRating,
+      reason: `${event.event_type} monitoring event changed account risk from ${previousScore} to ${newScore}.`,
+      action_taken: actionTaken,
+    }),
+  });
+
+  const alert = buildAlertForEvent(event.event_type, newScore, account.email);
+  if (alert) {
+    await createRiskAlert({
+      accountId: account.id,
+      monitoringEventId: event.id,
+      alertType: alert.alertType,
+      severity: alertSeverity(newScore),
+      title: alert.title,
+      message: alert.message,
+      actionRequired: alert.actionRequired,
+    });
+  }
+
+  return riskRecord;
 }
 
 async function saveOnboardingToSupabase(onboardingData: any, result: any, preset: string, telemetry: any) {
@@ -286,7 +652,7 @@ async function saveOnboardingToSupabase(onboardingData: any, result: any, preset
       dob: onboardingData.dob,
       email: onboardingData.email,
       phone: onboardingData.phone,
-      address: onboardingData.address,
+      address: onboardingData.address || "",
       document_type: onboardingData.documentType,
       document_image: onboardingData.documentImage,
       selfie_image: onboardingData.selfieImage,
@@ -329,6 +695,13 @@ async function saveOnboardingToSupabase(onboardingData: any, result: any, preset
       notes: `Verification submitted with ${preset} risk model.`,
     }),
   });
+
+  await safeSupabaseSideEffect("Account activation update", () => updateAccountActivation(
+    account,
+    status,
+    result.riskRating.overallScore,
+    `KYC decision ${status} from onboarding risk engine.`
+  ));
 
   return {
     id: verification.id,
@@ -376,7 +749,7 @@ app.get("/api/onboard/requests", async (req, res) => {
 
   try {
     const rows = await supabaseRequest<any[]>(
-      "kyc_verifications?select=id,created_at,status,result,kyc_profiles(full_name,dob,email,phone,address,document_type,document_image,selfie_image,consent_accepted,compliance_checked)&order=created_at.desc"
+      "kyc_verifications?select=id,created_at,status,result,kyc_profiles(full_name,dob,email,phone,address,document_type,consent_accepted,compliance_checked)&order=created_at.desc"
     );
 
     const requests = rows.map((row) => ({
@@ -390,12 +763,12 @@ app.get("/api/onboard/requests", async (req, res) => {
         phone: row.kyc_profiles.phone,
         address: row.kyc_profiles.address,
         documentType: row.kyc_profiles.document_type,
-        documentImage: row.kyc_profiles.document_image,
-        selfieImage: row.kyc_profiles.selfie_image,
+        documentImage: null,
+        selfieImage: null,
         consentAccepted: row.kyc_profiles.consent_accepted,
         complianceChecked: row.kyc_profiles.compliance_checked,
       },
-      result: row.result,
+      result: compactVerificationResult(row.result),
     }));
 
     res.json({ success: true, requests });
@@ -421,6 +794,24 @@ app.patch("/api/onboard/requests/:id/status", async (req, res) => {
       body: JSON.stringify({ status, reviewed_by: admin.email }),
     });
 
+    await safeSupabaseSideEffect("Manual account activation update", async () => {
+      const rows = await supabaseRequest<any[]>(
+        `kyc_verifications?id=eq.${req.params.id}&select=id,status,result,kyc_profiles(account_id,email)`
+      );
+      const row = rows[0];
+      const profile = row?.kyc_profiles;
+      if (!profile?.account_id) return null;
+      const accounts = await supabaseRequest<any[]>(
+        `app_accounts?id=eq.${profile.account_id}&select=id,email,latest_risk_score`
+      );
+      return updateAccountActivation(
+        accounts[0],
+        status,
+        row?.result?.riskRating?.overallScore || accounts[0]?.latest_risk_score || 0,
+        `Manual reviewer ${admin.email} changed verification status to ${status}.`
+      );
+    });
+
     res.json({ success: true, request: updated });
   } catch (error: any) {
     console.error("Supabase status update failed:", error);
@@ -428,7 +819,264 @@ app.patch("/api/onboard/requests/:id/status", async (req, res) => {
   }
 });
 
-// API: Monitoring feed derived from saved verification records.
+// API: Admin update of applicant profile fields and optional verification status.
+app.patch("/api/onboard/requests/:id", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  if (!isSupabaseConfigured()) {
+    return res.status(503).json({ success: false, error: "Supabase is not configured; request was not updated." });
+  }
+
+  try {
+    const rows = await supabaseRequest<any[]>(
+      `kyc_verifications?id=eq.${req.params.id}&select=id,status,result,profile_id,kyc_profiles(account_id,email)`
+    );
+    const verification = rows[0];
+    if (!verification) {
+      return res.status(404).json({ success: false, error: "KYC request not found." });
+    }
+
+    const { data = {}, status } = req.body || {};
+    const profilePatch: any = {};
+    if (typeof data.fullName === "string") profilePatch.full_name = data.fullName;
+    if (typeof data.dob === "string") profilePatch.dob = data.dob;
+    if (typeof data.email === "string") profilePatch.email = data.email;
+    if (typeof data.phone === "string") profilePatch.phone = data.phone;
+    if (typeof data.address === "string") profilePatch.address = data.address;
+    if (typeof data.documentType === "string") profilePatch.document_type = data.documentType;
+    if (typeof data.consentAccepted === "boolean") profilePatch.consent_accepted = data.consentAccepted;
+    if (typeof data.complianceChecked === "boolean") profilePatch.compliance_checked = data.complianceChecked;
+
+    if (Object.keys(profilePatch).length > 0) {
+      await supabaseRequest<any[]>(`kyc_profiles?id=eq.${verification.profile_id}`, {
+        method: "PATCH",
+        body: JSON.stringify(profilePatch),
+      });
+    }
+
+    let updatedVerification = verification;
+    if (status) {
+      const [updated] = await supabaseRequest<any[]>(`kyc_verifications?id=eq.${req.params.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status, reviewed_by: admin.email }),
+      });
+      updatedVerification = updated;
+
+      await safeSupabaseSideEffect("Admin edit activation update", async () => {
+        const profile = verification.kyc_profiles;
+        if (!profile?.account_id) return null;
+        const accounts = await supabaseRequest<any[]>(
+          `app_accounts?id=eq.${profile.account_id}&select=id,email,latest_risk_score`
+        );
+        return updateAccountActivation(
+          accounts[0],
+          status,
+          verification?.result?.riskRating?.overallScore || accounts[0]?.latest_risk_score || 0,
+          `Admin ${admin.email} edited request and set status to ${status}.`
+        );
+      });
+    }
+
+    await supabaseRequest<any[]>("kyc_audit_events", {
+      method: "POST",
+      body: JSON.stringify({
+        verification_id: req.params.id,
+        actor_email: admin.email,
+        event_type: "ADMIN_UPDATED_REQUEST",
+        old_status: verification.status,
+        new_status: status || verification.status,
+        notes: "Admin modified applicant verification data.",
+      }),
+    });
+
+    res.json({ success: true, request: updatedVerification });
+  } catch (error: any) {
+    console.error("Admin request update failed:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Admin delete of a KYC request and its profile data.
+app.delete("/api/onboard/requests/:id", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  if (!isSupabaseConfigured()) {
+    return res.status(503).json({ success: false, error: "Supabase is not configured; request was not deleted." });
+  }
+
+  try {
+    const rows = await supabaseRequest<any[]>(
+      `kyc_verifications?id=eq.${req.params.id}&select=id,profile_id,kyc_profiles(account_id,email)`
+    );
+    const verification = rows[0];
+    if (!verification) {
+      return res.status(404).json({ success: false, error: "KYC request not found." });
+    }
+
+    await safeSupabaseSideEffect("KYC delete audit", () => supabaseRequest<any[]>("risk_alerts", {
+      method: "POST",
+      body: JSON.stringify({
+        account_id: verification.kyc_profiles?.account_id || null,
+        alert_type: "MANUAL_REVIEW",
+        severity: "MEDIUM",
+        title: "KYC request deleted",
+        message: `Admin ${admin.email} deleted KYC request ${req.params.id}.`,
+        action_required: "Confirm deletion was intentional and request a new submission if needed.",
+        status: "RESOLVED",
+      }),
+    }));
+
+    await supabaseRequest<null>(`kyc_verifications?id=eq.${req.params.id}`, { method: "DELETE" });
+    if (verification.profile_id) {
+      await safeSupabaseSideEffect("KYC profile delete", () =>
+        supabaseRequest<null>(`kyc_profiles?id=eq.${verification.profile_id}`, { method: "DELETE" })
+      );
+    }
+
+    res.json({ success: true, deletedId: req.params.id });
+  } catch (error: any) {
+    console.error("Admin request delete failed:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Admin account CRUD operations.
+app.get("/api/admin/accounts", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  try {
+    const accounts = await supabaseRequest<any[]>(
+      "app_accounts?select=id,email,role,display_name,is_active,account_status,latest_risk_score,latest_risk_rating,last_login_at,created_at&order=created_at.desc"
+    );
+    res.json({ success: true, accounts });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.patch("/api/admin/accounts/:id", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  try {
+    const allowed = ["role", "display_name", "is_active", "account_status", "latest_risk_score", "latest_risk_rating"];
+    const patch = Object.fromEntries(Object.entries(req.body || {}).filter(([key]) => allowed.includes(key)));
+    const [account] = await supabaseRequest<any[]>(`app_accounts?id=eq.${req.params.id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+    res.json({ success: true, account });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/api/admin/accounts/:id", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  try {
+    if (admin.account?.id === req.params.id) {
+      return res.status(400).json({ success: false, error: "Admins cannot delete their own active account." });
+    }
+    await supabaseRequest<null>(`app_accounts?id=eq.${req.params.id}`, { method: "DELETE" });
+    res.json({ success: true, deletedId: req.params.id });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Create real post-onboarding monitoring events.
+app.post("/api/monitoring/events", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  if (!isSupabaseConfigured()) {
+    return res.status(503).json({ success: false, error: "Supabase is not configured; monitoring event was not saved." });
+  }
+
+  try {
+    const {
+      eventType = "LOGIN",
+      userName = admin.account?.display_name || "Demo User",
+      email = admin.email,
+      ip = req.socket.remoteAddress || "127.0.0.1",
+      location = "Mumbai, India",
+      device = req.headers["user-agent"] || "Browser session",
+      details,
+      metadata = {},
+    } = req.body || {};
+
+    const { riskScore, riskRating, mitigationApplied } = buildMonitoringAssessment(eventType, req.body || {});
+    const defaultDetails = `${eventType.replace("_", " ")} monitored for ${email}. Risk score ${riskScore}/100.`;
+    const accountRows = await supabaseRequest<any[]>(
+      `app_accounts?email=eq.${encodeURIComponent(email)}&select=id,email,latest_risk_score,account_status,is_active`
+    );
+    const targetAccount = accountRows[0] || admin.account;
+
+    const [event] = await supabaseRequest<any[]>("monitoring_events", {
+      method: "POST",
+      body: JSON.stringify({
+        account_id: targetAccount?.id || null,
+        event_type: eventType,
+        user_name: userName,
+        email,
+        ip,
+        location,
+        device: String(device).slice(0, 180),
+        details: details || defaultDetails,
+        risk_score: riskScore,
+        risk_rating: riskRating,
+        mitigation_applied: mitigationApplied,
+        metadata,
+      }),
+    });
+
+    const riskRecord = await safeSupabaseSideEffect("Continuous risk recalculation", () =>
+      recalculateRiskAfterMonitoring(targetAccount, event, req.body || {})
+    );
+
+    res.json({ success: true, event, riskRecalculation: riskRecord });
+  } catch (error: any) {
+    console.error("Monitoring event save failed:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Admin update/delete monitoring records.
+app.patch("/api/monitoring/events/:id", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  try {
+    const allowed = ["details", "risk_score", "risk_rating", "mitigation_applied", "metadata"];
+    const patch = Object.fromEntries(Object.entries(req.body || {}).filter(([key]) => allowed.includes(key)));
+    const [event] = await supabaseRequest<any[]>(`monitoring_events?id=eq.${req.params.id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+    res.json({ success: true, event });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/api/monitoring/events/:id", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  try {
+    await supabaseRequest<null>(`monitoring_events?id=eq.${req.params.id}`, { method: "DELETE" });
+    res.json({ success: true, deletedId: req.params.id });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Monitoring feed from real monitoring_events, with verification records as fallback.
 app.get("/api/monitoring/logs", async (req, res) => {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
@@ -438,6 +1086,29 @@ app.get("/api/monitoring/logs", async (req, res) => {
   }
 
   try {
+    const monitoringRows = await supabaseRequest<any[]>(
+      "monitoring_events?select=id,created_at,event_type,user_name,email,ip,location,device,details,risk_rating,risk_score,mitigation_applied&order=created_at.desc&limit=30"
+    );
+
+    if (monitoringRows.length > 0) {
+      const logs = monitoringRows.map((row) => ({
+        id: row.id,
+        timestamp: new Date(row.created_at).toLocaleTimeString(),
+        eventType: row.event_type,
+        userName: row.user_name,
+        email: row.email,
+        ip: row.ip,
+        location: row.location,
+        device: row.device,
+        details: row.details,
+        riskRating: row.risk_rating,
+        riskScore: row.risk_score,
+        mitigationApplied: row.mitigation_applied,
+      }));
+
+      return res.json({ success: true, logs });
+    }
+
     const rows = await supabaseRequest<any[]>(
       "kyc_verifications?select=id,created_at,status,result,kyc_profiles(full_name,email)&order=created_at.desc&limit=15"
     );
@@ -445,7 +1116,7 @@ app.get("/api/monitoring/logs", async (req, res) => {
     const logs = rows.map((row) => {
       const riskScore = row.result?.riskRating?.overallScore || 0;
       const eventType = riskScore > 70 ? "BEHAVIOR_DRIFT" : riskScore > 30 ? "DEVICE_SWAP" : "LOGIN";
-      const riskRating = riskScore > 80 ? "CRITICAL" : riskScore > 60 ? "HIGH" : riskScore > 30 ? "MEDIUM" : "LOW";
+      const riskRating = toRiskRating(riskScore);
       const fingerprint = row.result?.deviceFingerprint || {};
 
       return {
@@ -520,7 +1191,14 @@ app.post('/api/verify-identity', upload.fields([
       biometricData: {
         isVerified: aiData.biometric_analysis.is_verified,
         confidence: aiData.biometric_analysis.biometric_confidence,
-        cosineDistance: aiData.biometric_analysis.cosine_distance
+        cosineDistance: aiData.biometric_analysis.cosine_distance,
+        comparisonSource: aiData.biometric_analysis.comparison_source
+      },
+      documentFaceData: {
+        faceDetected: Boolean(aiData.document_face_analysis?.face_detected),
+        croppedFacePath: aiData.document_face_analysis?.cropped_face_path || null,
+        faceBox: aiData.document_face_analysis?.face_box || null,
+        confidence: aiData.document_face_analysis?.confidence || 0
       },
       behavioralData: {
         score: aiData.behavioral_analysis.behavioral_score,
@@ -657,33 +1335,77 @@ app.post("/api/onboard/process", async (req, res) => {
     const extractedName = realAiData?.ocr_analysis?.extracted_data?.name || "";
     const extractedDob = realAiData?.ocr_analysis?.extracted_data?.dob || "";
     const extractedText = realAiData?.ocr_analysis?.extracted_text || "";
+    const backendDocumentNumber = realAiData?.ocr_analysis?.extracted_data?.document_number || "";
+    const extractedDocumentNumber =
+      backendDocumentNumber && backendDocumentNumber !== "UNKNOWN"
+        ? backendDocumentNumber
+        : extractDocumentNumberFromText(extractedText, onboardingData.documentType);
     const realOcrScore = Number(realAiData?.ocr_analysis?.ocr_consistency_score);
     const realBiometricConfidence = Number(realAiData?.biometric_analysis?.biometric_confidence);
+    const realBiometricVerified = Boolean(realAiData?.biometric_analysis?.is_verified);
     const realRiskScore = Number(realAiData?.fraud_risk_assessment?.risk_score);
+    const realForgery = realAiData?.document_forgery_analysis || null;
+    const realDocumentFace = realAiData?.document_face_analysis || null;
+    const documentFaceDetected = Boolean(realDocumentFace?.face_detected);
+    const documentFaceConfidence = Number(realDocumentFace?.confidence);
+    const documentFaceCropPath = realDocumentFace?.cropped_face_path || null;
+    const documentFaceCropDataUrl = realDocumentFace?.cropped_face_data_url || null;
+    const biometricComparisonSource = realAiData?.biometric_analysis?.comparison_source || "document_image";
+    const realForgeryScore = Number(realForgery?.forgery_score);
     const realNameSimilarity = scoreNameMatch(onboardingData.fullName, extractedName, extractedText);
     const realDobMatch = dobAppearsInText(onboardingData.dob, extractedDob, extractedText);
+    const realDocNumberMatch = documentNumberMatches(onboardingData.documentNumber, extractedDocumentNumber, extractedText);
 
-    const nameSimilarity = realAiData ? realNameSimilarity : isSyntheticRisk ? 42 : isEditingRisk ? 72 : 98;
-    const dobMatch = realAiData ? realDobMatch : !isSyntheticRisk && !isEditingRisk;
-    const ocrConfidence = realAiData && Number.isFinite(realOcrScore)
+    const nameSimilarity = realAiData ? realNameSimilarity : 0;
+    const dobMatch = realAiData ? realDobMatch : false;
+    const docNumberMatch = realAiData ? realDocNumberMatch : false;
+    const rawOcrConfidence = realAiData && Number.isFinite(realOcrScore)
       ? Math.round(realOcrScore * 100)
-      : isEditingRisk ? 58 : isSyntheticRisk ? 65 : 97;
+      : 0;
+    const matchedOcrFieldCount = [
+      nameSimilarity >= 70,
+      dobMatch,
+      docNumberMatch,
+    ].filter(Boolean).length;
+    const evidenceBasedOcrConfidence = matchedOcrFieldCount === 3
+      ? 92
+      : matchedOcrFieldCount === 2
+        ? 72
+        : matchedOcrFieldCount === 1
+          ? 45
+          : 0;
+    const ocrConfidence = Math.max(rawOcrConfidence, evidenceBasedOcrConfidence);
     
-    const ocrMissingCritical = realAiData && (!extractedText || extractedName === "UNKNOWN" || ocrConfidence < 45);
+    const ocrMissingCritical = realAiData && (!extractedText || matchedOcrFieldCount === 0 || ocrConfidence < 45);
     const detailsEditedScore = realAiData
-      ? Math.max(isEditingRisk ? 92 : 12, ocrMissingCritical ? 72 : 100 - ocrConfidence)
+      ? Math.max(
+          Number(realForgery?.details_edited_score) || 0,
+          isEditingRisk ? 92 : 12,
+          ocrMissingCritical ? 72 : 100 - ocrConfidence,
+        )
       : isEditingRisk ? 92 : 12;
     const tamperedPhotoScore = realAiData
-      ? Math.max(isEditingRisk ? 88 : 15, ocrMissingCritical ? 70 : 100 - ocrConfidence)
+      ? Math.max(
+          Number(realForgery?.tampered_photo_score) || 0,
+          isEditingRisk ? 88 : 15,
+          ocrMissingCritical ? 70 : 100 - ocrConfidence,
+        )
       : isEditingRisk ? 88 : isDeepfakeRisk ? 40 : 15;
-    const metadataTraceLevel = isEditingRisk ? 95 : 10;
-    const textInconsistencyDetected = realAiData ? nameSimilarity < 70 || !dobMatch || ocrMissingCritical : isEditingRisk || isSyntheticRisk;
-    const forgeryConfidence = isEditingRisk ? 94 : 88;
+    const metadataTraceLevel = realAiData
+      ? Math.max(Number(realForgery?.metadata_trace_level) || 0, isEditingRisk ? 95 : 10)
+      : isEditingRisk ? 95 : 10;
+    const textInconsistencyDetected = realAiData
+      ? nameSimilarity < 70 || !dobMatch || !docNumberMatch || ocrMissingCritical
+      : isEditingRisk || isSyntheticRisk;
+    const forgeryConfidence = realAiData
+      ? Math.max(Number(realForgery?.confidence_score) || 0, isEditingRisk ? 94 : 70)
+      : isEditingRisk ? 94 : 88;
+    const realForgeryDetected = Boolean(realForgery?.forgery_detected) || (Number.isFinite(realForgeryScore) && realForgeryScore >= 0.45);
 
     const similarityPercentage = realAiData && Number.isFinite(realBiometricConfidence)
       ? Math.round(realBiometricConfidence * 100)
       : isDeepfakeRisk ? 30 : isEditingRisk ? 82 : 95;
-    const faceMatch = similarityPercentage >= 80;
+    const faceMatch = realAiData ? realBiometricVerified && similarityPercentage >= 80 : similarityPercentage >= 80;
     const deepfakeConfidence = isDeepfakeRisk ? 96 : 14;
 
     const backendLivenessPassed = Boolean(livenessResult?.passed);
@@ -711,8 +1433,20 @@ app.post("/api/onboard/process", async (req, res) => {
       if (ocrMissingCritical) overallScore = Math.max(overallScore, 72);
       if (nameSimilarity < 70) overallScore = Math.max(overallScore, 76);
       if (!dobMatch) overallScore = Math.max(overallScore, 68);
+      if (!docNumberMatch) overallScore = Math.max(overallScore, 74);
+      if (realForgeryDetected) overallScore = Math.max(overallScore, 78);
+      if (!documentFaceDetected) overallScore = Math.max(overallScore, 84);
       if (!faceMatch) overallScore = Math.max(overallScore, 88);
       if (!livenessComplete) overallScore = Math.max(overallScore, 82);
+      if (
+        matchedOcrFieldCount === 3 &&
+        documentFaceDetected &&
+        faceMatch &&
+        livenessComplete &&
+        !realForgeryDetected
+      ) {
+        overallScore = Math.min(overallScore, 28);
+      }
     } else if (hasSubmittedImages && realAiError) {
       overallScore = Math.max(overallScore, 55);
     } else if (isEditingRisk) {
@@ -730,25 +1464,36 @@ app.post("/api/onboard/process", async (req, res) => {
     // Standard baseline response payload
     let verificationResponse = {
       ocrData: {
-        fullNameExtracted: realAiData ? extractedName || "UNKNOWN" : isSyntheticRisk ? "JOHNATHAN DOE" : onboardingData.fullName.toUpperCase(),
-        dobExtracted: realAiData ? extractedDob || "UNKNOWN" : isSyntheticRisk ? "1994-01-01" : onboardingData.dob,
-        docNumberExtracted: onboardingData.documentType === "aadhaar" ? "8273 9182 3019" : "P" + Math.floor(1000000 + Math.random() * 9000000),
-        expirationDate: realAiData ? realAiData.ocr_analysis?.extracted_data?.expiry || "UNKNOWN" : "2034-11-20",
-        matchScores: { nameSimilarity, dobMatch, addressMatch: isSyntheticRisk ? 35 : 100 },
+        fullNameExtracted: realAiData ? extractedName || "UNKNOWN" : "AI_SERVICE_UNAVAILABLE",
+        dobExtracted: realAiData
+          ? extractedDob && extractedDob !== "UNKNOWN"
+            ? extractedDob
+            : dobMatch
+              ? onboardingData.dob
+              : "UNKNOWN"
+          : "AI_SERVICE_UNAVAILABLE",
+        docNumberExtracted: realAiData ? extractedDocumentNumber || "UNKNOWN" : "AI_SERVICE_UNAVAILABLE",
+        expirationDate: realAiData ? realAiData.ocr_analysis?.extracted_data?.expiry || "UNKNOWN" : "AI_SERVICE_UNAVAILABLE",
+        matchScores: { nameSimilarity, dobMatch, docNumberMatch },
         ocrConfidence,
       },
       forgeryDetection: {
         detailsEditedScore,
-        holagramMatch: !isEditingRisk,
+        holagramMatch: realAiData ? Boolean(realForgery?.hologram_match) : !isEditingRisk,
         tamperedPhotoScore,
         metadataTraceLevel,
-        textInconsistencyDetected,
+        textInconsistencyDetected: textInconsistencyDetected || realForgeryDetected,
         confidenceScore: forgeryConfidence,
       },
       faceVerification: {
         similarityPercentage,
         faceMatch,
         deepfakeConfidence,
+        comparisonSource: biometricComparisonSource,
+        documentFaceDetected,
+        documentFaceConfidence: Number.isFinite(documentFaceConfidence) ? Math.round(documentFaceConfidence * 100) : 0,
+        documentFaceCropPath,
+        documentFaceCropDataUrl,
       },
       livenessResult: {
         passed: livenessComplete && faceMatch,
@@ -793,6 +1538,14 @@ app.post("/api/onboard/process", async (req, res) => {
         },
         aiExplanation: "",
       },
+      accountActivation: {
+        status: toAccountStatus(toRequestStatus(verdict)),
+        action: verdict === "APPROVED"
+          ? "Account will be activated after the KYC record is saved."
+          : verdict === "MANUAL_REVIEW"
+            ? "Account remains locked until an analyst approves the case."
+            : "Account is rejected and access remains disabled.",
+      },
     };
 
     // If Gemini client is running, invoke it for a high-value real explanation or validation!
@@ -808,6 +1561,9 @@ app.post("/api/onboard/process", async (req, res) => {
           - Computed System Overall Risk Score: ${overallScore}/100
           - Verdict decision: ${verdict}
           - OCR confidence: ${ocrConfidence}%
+          - Name match score: ${nameSimilarity}%
+          - DOB match: ${dobMatch ? "matched" : "not matched"}
+          - Document number match: ${docNumberMatch ? "matched" : "not matched"}
           - Forgery indicator of photoshop editing: ${detailsEditedScore}%
           - Deepfake face probability: ${deepfakeConfidence}%
           - Behavior click anomaly: ${clickAnomalyIndex}%
@@ -826,14 +1582,18 @@ app.post("/api/onboard/process", async (req, res) => {
 
     // Default backup AI explanation if Gemini wasn't setup or hit an error
     if (!verificationResponse.riskRating.aiExplanation) {
-      if (realAiData && !faceMatch) {
+      if (realAiData && realForgeryDetected) {
+        verificationResponse.riskRating.aiExplanation = `DOCUMENT FORGERY DETECTED: The backend OpenCV forensics module found elevated tamper indicators (${detailsEditedScore}% edit risk, ${tamperedPhotoScore}% photo-region risk). The account is not activated automatically and the case is escalated for document review.`;
+      } else if (realAiData && !documentFaceDetected) {
+        verificationResponse.riskRating.aiExplanation = `DOCUMENT FACE EXTRACTION FAILED: OCR completed, but the backend could not isolate a portrait/photo region from the uploaded ${onboardingData.documentType} image. DeepFace comparison requires a stored document face crop, so the request was blocked for manual identity review.`;
+      } else if (realAiData && !faceMatch) {
         verificationResponse.riskRating.aiExplanation = `BIOMETRIC MISMATCH DETECTED: The uploaded document portrait and live face capture did not meet the face-match threshold. Similarity was ${similarityPercentage}%, so the onboarding request was rejected for possible impersonation or forged live capture.`;
       } else if (realAiData && textInconsistencyDetected) {
-        verificationResponse.riskRating.aiExplanation = `DOCUMENT DATA MISMATCH: OCR extracted "${verificationResponse.ocrData.fullNameExtracted}" and DOB "${verificationResponse.ocrData.dobExtracted}", which did not reliably match the submitted profile. The request was blocked from auto-approval and routed to risk handling.`;
+        verificationResponse.riskRating.aiExplanation = `DOCUMENT DATA MISMATCH: OCR extracted name "${verificationResponse.ocrData.fullNameExtracted}", DOB "${verificationResponse.ocrData.dobExtracted}", and document number "${verificationResponse.ocrData.docNumberExtracted}". The submitted profile did not reliably match these document fields, so the request was blocked from auto-approval and routed to risk handling.`;
       } else if (realAiData && !livenessComplete) {
         verificationResponse.riskRating.aiExplanation = `LIVENESS FAILED: ${livenessResult?.reason || "The backend liveness challenge was not verified."} The capture cannot be trusted for automatic approval, so the request was rejected pending a fresh live capture.`;
       } else if (realAiData) {
-        verificationResponse.riskRating.aiExplanation = `REAL AI VERIFICATION COMPLETE: OCR, biometric comparison, behavioral telemetry, and risk scoring were evaluated from the uploaded images. OCR confidence is ${ocrConfidence}%, face similarity is ${similarityPercentage}%, and the final risk score is ${overallScore}%.`;
+        verificationResponse.riskRating.aiExplanation = `REAL AI VERIFICATION COMPLETE: OCR extracted document fields, the document portrait was cropped and stored, DeepFace compared that crop with the live selfie, and behavioral risk scoring was evaluated. OCR confidence is ${ocrConfidence}%, face similarity is ${similarityPercentage}%, and the final risk score is ${overallScore}%.`;
       } else if (isEditingRisk) {
         verificationResponse.riskRating.aiExplanation = `DOCUMENT FORGERY DETECTED: Convolutional neural network text OCR extracted inconsistency in date boundaries and detected font mismatch. Photo editing traces identified on photo boundaries with confidence level of ${detailsEditedScore}%. System holds onboarding session for advanced compliance forensic review.`;
       } else if (isDeepfakeRisk) {

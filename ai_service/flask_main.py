@@ -19,6 +19,8 @@ app = Flask(__name__)
 UPLOAD_FOLDER = 'temp_uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+DOCUMENT_FACE_FOLDER = os.path.join(UPLOAD_FOLDER, 'document_faces')
+os.makedirs(DOCUMENT_FACE_FOLDER, exist_ok=True)
 
 # Initialize services once so model/reader setup is not repeated per request.
 ocr_service = OCRService()
@@ -55,10 +57,17 @@ def assess_liveness_frames(frames):
     face_cascade = cv2.CascadeClassifier(
         os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
     )
+    profile_cascade = cv2.CascadeClassifier(
+        os.path.join(cv2.data.haarcascades, "haarcascade_profileface.xml")
+    )
+    eye_cascade = cv2.CascadeClassifier(
+        os.path.join(cv2.data.haarcascades, "haarcascade_eye.xml")
+    )
 
     face_boxes = []
     motion_values = []
     eye_region_values = []
+    eye_counts = []
 
     previous_gray = None
     for frame in decoded_frames:
@@ -66,7 +75,9 @@ def assess_liveness_frames(frames):
         gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
 
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(55, 55))
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(40, 40))
+        if len(faces) == 0:
+            faces = profile_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(40, 40))
         if len(faces) > 0:
             face = max(faces, key=lambda box: box[2] * box[3])
             face_boxes.append(tuple(int(value) for value in face))
@@ -74,6 +85,13 @@ def assess_liveness_frames(frames):
             eye_region = gray[y + int(h * 0.18): y + int(h * 0.48), x: x + w]
             if eye_region.size:
                 eye_region_values.append(float(np.std(eye_region)))
+                eyes = eye_cascade.detectMultiScale(
+                    eye_region,
+                    scaleFactor=1.08,
+                    minNeighbors=4,
+                    minSize=(8, 8),
+                )
+                eye_counts.append(min(len(eyes), 2))
 
         if previous_gray is not None:
             diff = cv2.absdiff(gray, previous_gray)
@@ -83,6 +101,7 @@ def assess_liveness_frames(frames):
     face_ratio = len(face_boxes) / len(decoded_frames)
     average_motion = float(np.mean(motion_values)) if motion_values else 0.0
     eye_variation = float(np.std(eye_region_values)) if len(eye_region_values) > 1 else 0.0
+    eye_state_changed = bool(eye_counts) and max(eye_counts) >= 1 and min(eye_counts) == 0
 
     centers = [(x + w / 2, y + h / 2) for x, y, w, h in face_boxes]
     head_motion = 0.0
@@ -91,22 +110,22 @@ def assess_liveness_frames(frames):
         ys = [center[1] for center in centers]
         head_motion = max(max(xs) - min(xs), max(ys) - min(ys))
 
-    face_detected = face_ratio >= 0.45
-    motion_detected = 2.0 <= average_motion <= 45.0
-    blink_or_eye_motion_detected = eye_variation >= 1.2
-    head_motion_detected = head_motion >= 6.0
+    face_detected = face_ratio >= 0.25
+    motion_detected = 0.35 <= average_motion <= 55.0
+    blink_or_eye_motion_detected = eye_state_changed or eye_variation >= 1.1
+    head_motion_detected = head_motion >= 2.5
 
     score = 0
     if face_detected:
-        score += 35
+        score += 50
     if motion_detected:
         score += 25
     if blink_or_eye_motion_detected:
-        score += 20
+        score += 15
     if head_motion_detected:
-        score += 20
+        score += 10
 
-    passed = score >= 70
+    passed = score >= 70 and face_detected and motion_detected and blink_or_eye_motion_detected
     failed_reasons = []
     if not face_detected:
         failed_reasons.append("face was not consistently detected")
@@ -128,9 +147,18 @@ def assess_liveness_frames(frames):
         "face_detection_ratio": round(face_ratio, 2),
         "average_motion": round(average_motion, 2),
         "eye_variation": round(eye_variation, 2),
+        "eye_state_changed": eye_state_changed,
+        "eye_detection_counts": eye_counts,
         "head_motion": round(head_motion, 2),
         "reason": "Live face motion verified." if passed else "Liveness failed: " + ", ".join(failed_reasons) + ".",
     }
+
+def image_file_to_data_url(image_path):
+    if not image_path or not os.path.exists(image_path):
+        return None
+    with open(image_path, "rb") as image_file:
+        encoded = base64.b64encode(image_file.read()).decode("utf-8")
+    return f"data:image/jpeg;base64,{encoded}"
 
 @app.route('/api/liveness/check', methods=['POST'])
 def check_liveness():
@@ -158,8 +186,24 @@ def verify_identity():
 
     try:
         ocr_result = ocr_service.extract_and_validate(doc_path)
-        bio_result = biometric_service.verify_identity(doc_path, selfie_path)
+        document_face_result = ocr_service.extract_document_face(doc_path, DOCUMENT_FACE_FOLDER)
+        forgery_result = ocr_service.analyze_forgery(doc_path)
+        document_face_path = document_face_result.get("cropped_face_path") if document_face_result.get("face_detected") else None
+        if document_face_path:
+            bio_result = biometric_service.verify_identity(doc_path, selfie_path, document_face_path)
+        else:
+            bio_result = {
+                "is_verified": False,
+                "biometric_confidence": 0,
+                "cosine_distance": None,
+                "model": biometric_service.model_name,
+                "comparison_source": "document_face_crop_missing",
+                "details": {"error": document_face_result.get("error", "document face crop was not available")},
+            }
         behavior_result = behavioral_service.evaluate_behavior(behavior_meta)
+        if document_face_path:
+            document_face_result["cropped_face_path"] = os.path.abspath(document_face_path)
+            document_face_result["cropped_face_data_url"] = image_file_to_data_url(document_face_path)
         
         biometric_conf = bio_result["biometric_confidence"]
         ocr_const = ocr_result["ocr_consistency_score"]
@@ -170,6 +214,8 @@ def verify_identity():
         return jsonify({
             "status": "success",
             "ocr_analysis": ocr_result,
+            "document_face_analysis": document_face_result,
+            "document_forgery_analysis": forgery_result,
             "biometric_analysis": bio_result,
             "behavioral_analysis": behavior_result,
             "fraud_risk_assessment": final_risk

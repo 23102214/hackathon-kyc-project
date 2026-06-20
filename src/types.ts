@@ -8,7 +8,8 @@ export interface OnboardingData {
   dob: string;
   email: string;
   phone: string;
-  address: string;
+  address?: string;
+  documentNumber?: string;
   documentType: "passport" | "aadhaar" | "pan" | "driver_license";
   documentImage: string | null; // DataURL
   selfieImage: string | null;     // DataURL
@@ -25,7 +26,7 @@ export interface VerificationResult {
     matchScores: {
       nameSimilarity: number;
       dobMatch: boolean;
-      addressMatch: number;
+      docNumberMatch?: boolean;
     };
     ocrConfidence: number;
   };
@@ -41,6 +42,11 @@ export interface VerificationResult {
     similarityPercentage: number;
     faceMatch: boolean;
     deepfakeConfidence: number; // 0-100 indicating raw deepfake risk
+    comparisonSource?: string;
+    documentFaceDetected?: boolean;
+    documentFaceConfidence?: number;
+    documentFaceCropPath?: string | null;
+    documentFaceCropDataUrl?: string | null;
   };
   livenessResult: {
     passed: boolean;
@@ -85,12 +91,16 @@ export interface VerificationResult {
     };
     aiExplanation: string;
   };
+  accountActivation?: {
+    status: "PENDING_KYC" | "ACTIVE" | "REVIEW_LOCKED" | "REJECTED" | "SUSPENDED";
+    action: string;
+  };
 }
 
 export interface ContinuousMonitoringLog {
   id: string;
   timestamp: string;
-  eventType: "LOGIN" | "TRANSACTION" | "DEVICE_SWAP" | "GEOLOCATION_SWAP" | "BEHAVIOR_DRIFT";
+  eventType: "LOGIN" | "TRANSACTION" | "DEVICE_SWAP" | "GEOLOCATION_SWAP" | "BEHAVIOR_DRIFT" | "AML_ALERT" | "FRAUD_ALERT";
   userName: string;
   email: string;
   ip: string;

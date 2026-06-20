@@ -14,38 +14,126 @@ import { supabase } from "../lib/supabaseClient";
 export default function ContinuousFeed() {
   const [isPlaying, setIsPlaying] = useState(true);
   const [logs, setLogs] = useState<ContinuousMonitoringLog[]>([]);
+  const [isCreatingEvent, setIsCreatingEvent] = useState(false);
 
   const [sparkRate, setSparkRate] = useState(0);
   const [kafkaClusterStatus, setKafkaClusterStatus] = useState("API CONNECTING");
 
+  const loadMonitoringLogs = async () => {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      const response = await fetch("/api/monitoring/logs", {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      const payload = await response.json();
+      if (payload.success) {
+        setLogs(payload.logs || []);
+        setSparkRate(payload.logs?.length || 0);
+        setKafkaClusterStatus("API CONNECTED");
+      } else {
+        setKafkaClusterStatus("API ERROR");
+      }
+    } catch (error) {
+      console.warn("Could not load monitoring logs from API.", error);
+      setKafkaClusterStatus("API OFFLINE");
+    }
+  };
+
   useEffect(() => {
     if (!isPlaying) return;
-
-    async function loadMonitoringLogs() {
-      try {
-        const { data } = await supabase.auth.getSession();
-        const token = data.session?.access_token;
-        const response = await fetch("/api/monitoring/logs", {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-        const payload = await response.json();
-        if (payload.success) {
-          setLogs(payload.logs || []);
-          setSparkRate(payload.logs?.length || 0);
-          setKafkaClusterStatus("API CONNECTED");
-        } else {
-          setKafkaClusterStatus("API ERROR");
-        }
-      } catch (error) {
-        console.warn("Could not load monitoring logs from API.", error);
-        setKafkaClusterStatus("API OFFLINE");
-      }
-    }
 
     loadMonitoringLogs();
     const interval = setInterval(loadMonitoringLogs, 5000);
     return () => clearInterval(interval);
   }, [isPlaying]);
+
+  const createDemoEvent = async (eventType: ContinuousMonitoringLog["eventType"]) => {
+    setIsCreatingEvent(true);
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      const demoPayloads: Record<ContinuousMonitoringLog["eventType"], Record<string, unknown>> = {
+        LOGIN: {
+          eventType,
+          details: "Login attempt from a recognized device and expected city.",
+          location: "Mumbai, India",
+          device: "Chrome / Windows 11",
+        },
+        TRANSACTION: {
+          eventType,
+          amount: 250000,
+          country: "Singapore",
+          repeatedActivity: true,
+          details: "High-value outbound transaction to a new beneficiary outside normal behavior.",
+          location: "Mumbai, India",
+          device: "Chrome / Windows 11",
+        },
+        DEVICE_SWAP: {
+          eventType,
+          deviceChanged: true,
+          vpnDetected: true,
+          details: "New device fingerprint appeared immediately after onboarding approval.",
+          location: "Bengaluru, India",
+          device: "Firefox / Android",
+        },
+        GEOLOCATION_SWAP: {
+          eventType,
+          country: "United Arab Emirates",
+          vpnDetected: true,
+          details: "Impossible travel pattern detected between two login sessions.",
+          location: "Dubai, UAE",
+          device: "Safari / iOS",
+        },
+        BEHAVIOR_DRIFT: {
+          eventType,
+          repeatedActivity: true,
+          details: "Typing and cursor behavior changed sharply from onboarding baseline.",
+          location: "Mumbai, India",
+          device: "Chrome / Windows 11",
+        },
+        AML_ALERT: {
+          eventType,
+          amount: 750000,
+          country: "Singapore",
+          riskyReceiver: true,
+          details: "AML rule triggered by large transfer, new beneficiary, and non-domestic route.",
+          location: "Mumbai, India",
+          device: "Chrome / Windows 11",
+        },
+        FRAUD_ALERT: {
+          eventType,
+          deviceChanged: true,
+          vpnDetected: true,
+          repeatedActivity: true,
+          details: "Fraud rule triggered by VPN usage, device swap, and repeated action burst.",
+          location: "Unknown VPN Exit",
+          device: "Unknown Browser",
+        },
+      };
+
+      const response = await fetch("/api/monitoring/events", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(demoPayloads[eventType]),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) {
+        alert(payload.error || "Could not create monitoring event.");
+        return;
+      }
+
+      await loadMonitoringLogs();
+    } catch (error) {
+      console.warn("Could not create monitoring event.", error);
+      alert("Could not reach monitoring API.");
+    } finally {
+      setIsCreatingEvent(false);
+    }
+  };
 
   const highRiskCount = logs.filter((log) => log.riskRating === "HIGH" || log.riskRating === "CRITICAL").length;
   const approvedCount = logs.filter((log) => log.mitigationApplied.toLowerCase().includes("approved")).length;
@@ -134,6 +222,41 @@ export default function ContinuousFeed() {
           <p className="text-[11px] text-slate-400">
             Verification records currently held for manual review.
           </p>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900">Generate Monitoring Events</h3>
+            <p className="text-xs text-slate-500">Create real Supabase-backed login, transaction, AML, and fraud monitoring records.</p>
+          </div>
+          <button
+            onClick={loadMonitoringLogs}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"
+          >
+            <RefreshCw className="h-3.5 w-3.5" /> Refresh
+          </button>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {[
+            ["LOGIN", "Login"],
+            ["TRANSACTION", "Transaction"],
+            ["AML_ALERT", "AML Alert"],
+            ["FRAUD_ALERT", "Fraud Alert"],
+            ["DEVICE_SWAP", "Device Swap"],
+            ["GEOLOCATION_SWAP", "Geo Swap"],
+            ["BEHAVIOR_DRIFT", "Behavior Drift"],
+          ].map(([eventType, label]) => (
+            <button
+              key={eventType}
+              disabled={isCreatingEvent}
+              onClick={() => createDemoEvent(eventType as ContinuousMonitoringLog["eventType"])}
+              className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-bold text-white transition hover:bg-slate-700 disabled:opacity-50"
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </div>
 

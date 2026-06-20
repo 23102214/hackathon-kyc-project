@@ -92,6 +92,7 @@ export default function OnboardingFlow({ onOnboardingComplete }: OnboardingFlowP
     email: "",
     phone: "",
     address: "",
+    documentNumber: "",
     documentType: "passport",
     documentImage: null,
     selfieImage: null,
@@ -375,6 +376,7 @@ export default function OnboardingFlow({ onOnboardingComplete }: OnboardingFlowP
       email: "",
       phone: "",
       address: "",
+      documentNumber: "",
       documentType: "passport",
       documentImage: null,
       selfieImage: null,
@@ -482,17 +484,6 @@ export default function OnboardingFlow({ onOnboardingComplete }: OnboardingFlowP
                     />
                   </label>
                 ))}
-                <label className="block">
-                  <span className="text-sm font-bold text-slate-700">Address</span>
-                  <textarea
-                    value={formData.address}
-                    onKeyDown={handleKeyDown}
-                    onChange={(event) => handleFieldChange("address", event.target.value)}
-                    placeholder="Enter current address"
-                    rows={3}
-                    className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-3 text-sm outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
-                  />
-                </label>
               </div>
               <div className="mt-8 flex justify-between">
                 <button onClick={() => setStep(1)} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">
@@ -500,7 +491,7 @@ export default function OnboardingFlow({ onOnboardingComplete }: OnboardingFlowP
                 </button>
                 <button
                   onClick={() => setStep(3)}
-                  disabled={!formData.fullName || !formData.email || !formData.phone || !formData.dob || !formData.address}
+                  disabled={!formData.fullName || !formData.email || !formData.phone || !formData.dob}
                   className="inline-flex items-center gap-2 rounded-lg bg-teal-600 px-5 py-3 text-sm font-bold text-white hover:bg-teal-700 disabled:opacity-50"
                 >
                   Continue <ArrowRight className="h-4 w-4" />
@@ -535,6 +526,17 @@ export default function OnboardingFlow({ onOnboardingComplete }: OnboardingFlowP
                   </button>
                 ))}
               </div>
+              <label className="mt-6 block">
+                <span className="text-sm font-bold text-slate-700">Document Number</span>
+                <input
+                  type="text"
+                  value={formData.documentNumber || ""}
+                  onKeyDown={handleKeyDown}
+                  onChange={(event) => handleFieldChange("documentNumber", event.target.value)}
+                  placeholder="Enter the ID number printed on the document"
+                  className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-3 text-sm uppercase outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                />
+              </label>
               <div className="mt-6 rounded-lg border-2 border-dashed border-slate-200 bg-slate-50 p-8 text-center">
                 {formData.documentImage ? (
                   <div className="mx-auto max-w-sm">
@@ -560,7 +562,7 @@ export default function OnboardingFlow({ onOnboardingComplete }: OnboardingFlowP
                 </button>
                 <button
                   onClick={() => setStep(4)}
-                  disabled={!formData.documentImage}
+                  disabled={!formData.documentImage || !formData.documentNumber}
                   className="inline-flex items-center gap-2 rounded-lg bg-teal-600 px-5 py-3 text-sm font-bold text-white hover:bg-teal-700 disabled:opacity-50"
                 >
                   Continue to OCR <ArrowRight className="h-4 w-4" />
@@ -722,7 +724,7 @@ export default function OnboardingFlow({ onOnboardingComplete }: OnboardingFlowP
             <div className="mx-auto max-w-3xl">
               <h1 className="text-2xl font-black text-slate-950">Liveness Detection</h1>
               <p className="mt-1 text-sm text-slate-600">
-                Follow the live camera challenge. The backend will verify face presence, natural motion, eye-region movement, and head movement.
+                Keep your full face inside the frame, blink once, and make a small left-right head movement while the check runs.
               </p>
 
               <div className="mt-6 overflow-hidden rounded-lg border border-slate-200 bg-slate-50 p-5">
@@ -744,7 +746,7 @@ export default function OnboardingFlow({ onOnboardingComplete }: OnboardingFlowP
                   <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950/70 to-transparent p-4">
                     <p className="text-sm font-bold text-white">
                       {isLivenessChecking
-                        ? "Blink naturally and turn your head left and right until capture finishes."
+                        ? "Keep your full face visible, blink once, and make a small left-right head movement."
                         : livenessResult
                           ? livenessResult.reason
                           : "Run the live challenge to continue."}
@@ -772,7 +774,7 @@ export default function OnboardingFlow({ onOnboardingComplete }: OnboardingFlowP
 
               <div className="mt-5 grid gap-3 sm:grid-cols-2">
                 {[
-                  { key: "blink", label: "Eye-region motion detected" },
+                  { key: "blink", label: "Blink or eye-state change detected" },
                   { key: "left", label: "Head movement detected" },
                   { key: "right", label: "Face consistently detected" },
                   { key: "smile", label: "Natural frame motion detected" },
@@ -857,9 +859,8 @@ export default function OnboardingFlow({ onOnboardingComplete }: OnboardingFlowP
                       ["Email", formData.email],
                       ["Phone", formData.phone],
                       ["Date of Birth", formData.dob],
-                      ["Address", formData.address],
                     ].map(([label, value]) => (
-                      <div key={label} className={label === "Address" ? "sm:col-span-2" : ""}>
+                      <div key={label}>
                         <dt className="text-slate-500">{label}</dt>
                         <dd className="mt-1 font-bold text-slate-950">{value || "Not provided"}</dd>
                       </div>
@@ -973,6 +974,14 @@ export default function OnboardingFlow({ onOnboardingComplete }: OnboardingFlowP
                     <dd className="mt-1 font-bold text-slate-950">{verificationResult.ocrData.dobExtracted || "Not extracted"}</dd>
                   </div>
                   <div>
+                    <dt className="text-slate-500">Document number extracted</dt>
+                    <dd className="mt-1 font-bold text-slate-950">{verificationResult.ocrData.docNumberExtracted || "Not extracted"}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-500">Document number matched</dt>
+                    <dd className="mt-1 font-bold text-slate-950">{verificationResult.ocrData.matchScores.docNumberMatch ? "Yes" : "No"}</dd>
+                  </div>
+                  <div>
                     <dt className="text-slate-500">Name match score</dt>
                     <dd className="mt-1 font-bold text-slate-950">{verificationResult.ocrData.matchScores.nameSimilarity}%</dd>
                   </div>
@@ -981,6 +990,64 @@ export default function OnboardingFlow({ onOnboardingComplete }: OnboardingFlowP
                     <dd className="mt-1 font-bold text-slate-950">{verificationResult.ocrData.matchScores.dobMatch ? "Yes" : "No"}</dd>
                   </div>
                 </dl>
+              </section>
+              <section className="mt-6 rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+                <h2 className="mb-5 flex items-center gap-2 text-xl font-black text-slate-950">
+                  <Fingerprint className="h-5 w-5 text-teal-700" /> Document Face Extraction
+                </h2>
+                <div className="grid gap-5 md:grid-cols-[220px_1fr]">
+                  <div className="overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+                    {verificationResult.faceVerification.documentFaceCropDataUrl ? (
+                      <img
+                        src={verificationResult.faceVerification.documentFaceCropDataUrl}
+                        alt="Cropped document face"
+                        className="aspect-square w-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex aspect-square items-center justify-center px-4 text-center text-sm font-bold text-slate-400">
+                        No document face crop available
+                      </div>
+                    )}
+                  </div>
+                  <dl className="grid gap-4 text-sm sm:grid-cols-2">
+                    <div>
+                      <dt className="text-slate-500">Face crop extracted</dt>
+                      <dd className="mt-1 font-bold text-slate-950">
+                        {verificationResult.faceVerification.documentFaceDetected ? "Yes" : "No"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-slate-500">Crop confidence</dt>
+                      <dd className="mt-1 font-bold text-slate-950">
+                        {verificationResult.faceVerification.documentFaceConfidence || 0}%
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-slate-500">DeepFace comparison source</dt>
+                      <dd className="mt-1 font-bold text-slate-950">
+                        {verificationResult.faceVerification.comparisonSource === "document_face_crop"
+                          ? "Stored document face crop"
+                          : verificationResult.faceVerification.comparisonSource === "document_face_crop_missing"
+                            ? "Document face crop missing"
+                          : "Full document image"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-slate-500">Selfie similarity score</dt>
+                      <dd className="mt-1 font-bold text-slate-950">
+                        {verificationResult.faceVerification.similarityPercentage}%
+                      </dd>
+                    </div>
+                    {verificationResult.faceVerification.documentFaceCropPath ? (
+                      <div className="sm:col-span-2">
+                        <dt className="text-slate-500">Stored cropped face image</dt>
+                        <dd className="mt-1 break-all font-bold text-slate-950">
+                          {verificationResult.faceVerification.documentFaceCropPath}
+                        </dd>
+                      </div>
+                    ) : null}
+                  </dl>
+                </div>
               </section>
               <div className="mt-6 flex flex-wrap justify-center gap-3">
                 <button onClick={resetFlow} className="rounded-lg border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">
