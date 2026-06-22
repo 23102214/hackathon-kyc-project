@@ -6,8 +6,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 # ai_service/flask_main.py
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
-import cv2
-import numpy as np
 
 app = Flask(__name__)
 UPLOAD_FOLDER = 'temp_uploads'
@@ -59,6 +57,9 @@ def get_services():
     return ocr_service, biometric_service, behavioral_service, risk_engine
 
 def decode_data_url_frame(frame):
+    import cv2
+    import numpy as np
+
     if not isinstance(frame, str):
         return None
     payload = re.sub(r"^data:image/[^;]+;base64,", "", frame)
@@ -70,6 +71,9 @@ def decode_data_url_frame(frame):
         return None
 
 def assess_liveness_frames(frames):
+    import cv2
+    import numpy as np
+
     decoded_frames = [decode_data_url_frame(frame) for frame in frames]
     decoded_frames = [frame for frame in decoded_frames if frame is not None]
 
