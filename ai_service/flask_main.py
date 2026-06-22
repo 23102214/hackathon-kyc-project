@@ -16,6 +16,24 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 DOCUMENT_FACE_FOLDER = os.path.join(UPLOAD_FOLDER, 'document_faces')
 os.makedirs(DOCUMENT_FACE_FOLDER, exist_ok=True)
 
+
+@app.route('/', methods=['GET'])
+def read_root():
+    return jsonify({
+        "status": "ok",
+        "service": "ai_service",
+        "routes": [
+            "/api/verify",
+            "/api/liveness/check",
+            "/health",
+        ],
+    }), 200
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy"}), 200
+
 ocr_service = None
 biometric_service = None
 behavioral_service = None
