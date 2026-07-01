@@ -1252,10 +1252,19 @@ app.post("/api/liveness/check", async (req, res) => {
     });
     res.json({ success: true, liveness: response.data });
   } catch (error: any) {
-    console.error("Liveness check failed:", error?.response?.data || error.message);
+    const upstreamStatus = error?.response?.status;
+    const upstreamError = error?.response?.data?.error || error?.response?.data || error.message;
+    console.error("Liveness check failed:", {
+      aiServiceUrl: AI_SERVICE_URL,
+      upstreamStatus,
+      upstreamError,
+    });
     res.status(500).json({
       success: false,
-      error: "Could not complete backend liveness verification. Make sure python ai_service\\flask_main.py is running.",
+      error: upstreamStatus
+        ? `AI service liveness failed with HTTP ${upstreamStatus}: ${typeof upstreamError === "string" ? upstreamError : JSON.stringify(upstreamError)}`
+        : `AI service liveness request failed: ${upstreamError}`,
+      aiServiceUrl: AI_SERVICE_URL,
     });
   }
 });
