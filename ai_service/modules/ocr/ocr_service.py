@@ -9,13 +9,34 @@ from uuid import uuid4
 class OCRService:
     def __init__(self):
         # Initialize reader for English
-        self.reader = easyocr.Reader(['en'])
+        self.reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+
+    def prepare_ocr_image(self, image_path):
+        image = cv2.imread(image_path)
+        if image is None:
+            return image_path, None
+
+        height, width = image.shape[:2]
+        max_side = max(height, width)
+        if max_side <= 1600:
+            return image_path, None
+
+        scale = 1600 / max_side
+        resized = cv2.resize(image, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+        resized_path = os.path.join(os.path.dirname(image_path), f"ocr_{uuid4().hex}.jpg")
+        cv2.imwrite(resized_path, resized, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        return resized_path, resized_path
 
     def extract_text(self, image_path):
-        results = self.reader.readtext(image_path)
-        # results format: [([[x,y], [x,y], ...], text, confidence), ...]
-        extracted_text = " ".join([res[1] for res in results])
-        return extracted_text, results
+        ocr_path, cleanup_path = self.prepare_ocr_image(image_path)
+        try:
+            results = self.reader.readtext(ocr_path)
+            # results format: [([[x,y], [x,y], ...], text, confidence), ...]
+            extracted_text = " ".join([res[1] for res in results])
+            return extracted_text, results
+        finally:
+            if cleanup_path and os.path.exists(cleanup_path):
+                os.remove(cleanup_path)
 
     def check_inconsistencies(self, extracted_text):
         keywords = ['NAME', 'ID', 'DOB', 'EXP']
@@ -153,10 +174,15 @@ class OCRService:
 
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
-        face_cascade = cv2.CascadeClassifier(
-            os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
-        )
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=4, minSize=(45, 45))
+        cascades = [
+            cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")),
+            cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, "haarcascade_profileface.xml")),
+        ]
+        faces = []
+        for cascade in cascades:
+            detected = cascade.detectMultiScale(gray, scaleFactor=1.06, minNeighbors=4, minSize=(40, 40))
+            if len(detected):
+                faces.extend(detected)
 
         if len(faces) == 0:
             return {
