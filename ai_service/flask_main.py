@@ -249,6 +249,73 @@ def image_file_to_data_url(image_path):
         encoded = base64.b64encode(image_file.read()).decode("utf-8")
     return f"data:image/jpeg;base64,{encoded}"
 
+def fallback_verification_response(error_message, behavior_meta=None):
+    request_frequency = int((behavior_meta or {}).get("request_frequency", 1) or 1)
+    ip_anomaly = bool((behavior_meta or {}).get("ip_change_detected", False))
+    behavioral_score = 0.0
+    flags = []
+    if ip_anomaly:
+        behavioral_score += 0.35
+        flags.append("multiple_ip_sources")
+    high_frequency = request_frequency > 5
+    if high_frequency:
+        behavioral_score += min(0.5, (request_frequency - 5) * 0.08)
+        flags.append("high_frequency_activity")
+
+    return {
+        "status": "degraded",
+        "error": error_message,
+        "ocr_analysis": {
+            "ocr_consistency_score": 0,
+            "extracted_text": "",
+            "extracted_data": {
+                "name": "UNKNOWN",
+                "dob": "UNKNOWN",
+                "document_number": "UNKNOWN",
+                "address": "UNKNOWN",
+                "expiry": "UNKNOWN",
+            },
+            "missing_fields": ["NAME", "ID", "DOB", "EXP"],
+            "error": error_message,
+        },
+        "document_face_analysis": {
+            "face_detected": False,
+            "cropped_face_path": None,
+            "cropped_face_data_url": None,
+            "face_box": None,
+            "confidence": 0,
+            "error": error_message,
+        },
+        "document_forgery_analysis": {
+            "forgery_detected": False,
+            "forgery_score": 0,
+            "details_edited_score": 0,
+            "tampered_photo_score": 0,
+            "metadata_trace_level": 0,
+            "hologram_match": False,
+            "confidence_score": 0,
+            "signals": ["AI verification ran in degraded mode"],
+        },
+        "biometric_analysis": {
+            "is_verified": False,
+            "biometric_confidence": 0,
+            "cosine_distance": None,
+            "model": "unavailable",
+            "comparison_source": "ai_service_degraded",
+            "details": {"error": error_message},
+        },
+        "behavioral_analysis": {
+            "behavioral_score": round(min(behavioral_score, 1.0), 3),
+            "ip_anomaly": ip_anomaly,
+            "high_frequency_flag": high_frequency,
+            "flags": flags,
+        },
+        "fraud_risk_assessment": {
+            "risk_score": 0.55,
+            "risk_level": "Medium",
+        },
+    }
+
 @app.route('/api/liveness/check', methods=['POST'])
 def check_liveness():
     try:
@@ -326,7 +393,8 @@ def verify_identity():
         }), 200
 
     except Exception as e:
-        return jsonify({"status": "failed", "error": str(e)}), 500
+        app.logger.exception("Verification failed; returning degraded response")
+        return jsonify(fallback_verification_response(str(e), behavior_meta)), 200
         
     finally:
         if os.path.exists(doc_path):
