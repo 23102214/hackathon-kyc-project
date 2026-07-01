@@ -1,8 +1,26 @@
 
-from deepface import DeepFace
 import logging
 import os
 import shutil
+import sys
+
+os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
+
+
+def ensure_tensorflow_keras_compat():
+    try:
+        __import__("tensorflow.keras")
+        return
+    except ModuleNotFoundError:
+        pass
+
+    try:
+        import tensorflow as tf
+        import tf_keras
+        setattr(tf, "keras", tf_keras)
+        sys.modules.setdefault("tensorflow.keras", tf_keras)
+    except Exception:
+        logging.exception("TensorFlow Keras compatibility setup failed")
 
 class BiometricService:
     def __init__(self, model_name='VGG-Face'):
@@ -23,6 +41,9 @@ class BiometricService:
 
     def verify_face(self, img1_path, img2_path):
         try:
+            ensure_tensorflow_keras_compat()
+            from deepface import DeepFace
+
             self._ensure_local_weights()
             # verify method returns a dictionary with 'verified' key
             result = DeepFace.verify(img1_path=img1_path, img2_path=img2_path, model_name=self.model_name, enforce_detection=False)

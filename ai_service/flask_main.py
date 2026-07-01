@@ -1,10 +1,12 @@
 import sys
 import os
+import importlib
 import base64
 import re
 import time
 import traceback
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
 # ai_service/flask_main.py
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
@@ -52,11 +54,20 @@ def check_import(label, import_fn):
         }
 
 
+def import_tensorflow_keras():
+    os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
+    try:
+        return importlib.import_module("tensorflow.keras")
+    except ModuleNotFoundError:
+        return importlib.import_module("tf_keras")
+
+
 @app.route('/health/models', methods=['GET'])
 def model_health_check():
     checks = {
         "cv2": check_import("cv2", lambda: __import__("cv2")),
         "easyocr": check_import("easyocr", lambda: __import__("easyocr")),
+        "tensorflow_keras": check_import("tensorflow_keras", import_tensorflow_keras),
         "deepface": check_import("deepface", lambda: __import__("deepface")),
         "xgboost": check_import("xgboost", lambda: __import__("xgboost")),
     }

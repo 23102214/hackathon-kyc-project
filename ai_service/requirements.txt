@@ -3,9 +3,10 @@ gunicorn==22.0.0
 numpy==1.26.4
 pandas==2.2.2
 opencv-python-headless==4.10.0.84
-easyocr==1.7.1
-tensorflow==2.15.1
-deepface==0.0.93
+easyocr==1.7.2
+tensorflow==2.21.0
+tf-keras==2.21.0
+deepface==0.0.100
 xgboost==2.1.1
 scikit-learn==1.5.2
 shap==0.46.0
