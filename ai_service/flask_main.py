@@ -2,6 +2,8 @@ import sys
 import os
 import base64
 import re
+import time
+import traceback
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 # ai_service/flask_main.py
 from flask import Flask, request, jsonify
@@ -31,6 +33,38 @@ def read_root():
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy"}), 200
+
+
+def check_import(label, import_fn):
+    started_at = time.time()
+    try:
+        import_fn()
+        return {
+            "status": "ok",
+            "duration_ms": round((time.time() - started_at) * 1000),
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "error": str(exc),
+            "traceback": traceback.format_exc(limit=2),
+            "duration_ms": round((time.time() - started_at) * 1000),
+        }
+
+
+@app.route('/health/models', methods=['GET'])
+def model_health_check():
+    checks = {
+        "cv2": check_import("cv2", lambda: __import__("cv2")),
+        "easyocr": check_import("easyocr", lambda: __import__("easyocr")),
+        "deepface": check_import("deepface", lambda: __import__("deepface")),
+        "xgboost": check_import("xgboost", lambda: __import__("xgboost")),
+    }
+    all_ok = all(check["status"] == "ok" for check in checks.values())
+    return jsonify({
+        "status": "ok" if all_ok else "degraded",
+        "checks": checks,
+    }), 200 if all_ok else 503
 
 ocr_service = None
 biometric_service = None
@@ -316,6 +350,10 @@ def fallback_verification_response(error_message, behavior_meta=None):
         },
     }
 
+def mark_stage(timings, label, started_at):
+    timings[label] = round((time.time() - started_at) * 1000)
+    return time.time()
+
 @app.route('/api/liveness/check', methods=['POST'])
 def check_liveness():
     try:
@@ -352,13 +390,19 @@ def verify_identity():
     ip_change = request.form.get('ip_change_detected', 'false').lower() == 'true'
     freq = int(request.form.get('request_frequency', 1))
     behavior_meta = {"ip_change_detected": ip_change, "request_frequency": freq}
+    timings = {}
+    stage_started_at = time.time()
 
     try:
         ocr_service, biometric_service, behavioral_service, risk_engine = get_services()
+        stage_started_at = mark_stage(timings, "load_services_ms", stage_started_at)
 
         ocr_result = ocr_service.extract_and_validate(doc_path)
+        stage_started_at = mark_stage(timings, "ocr_ms", stage_started_at)
         document_face_result = ocr_service.extract_document_face(doc_path, DOCUMENT_FACE_FOLDER)
+        stage_started_at = mark_stage(timings, "document_face_ms", stage_started_at)
         forgery_result = ocr_service.analyze_forgery(doc_path)
+        stage_started_at = mark_stage(timings, "forgery_ms", stage_started_at)
         document_face_path = document_face_result.get("cropped_face_path") if document_face_result.get("face_detected") else None
         if document_face_path:
             bio_result = biometric_service.verify_identity(doc_path, selfie_path, document_face_path)
@@ -371,7 +415,9 @@ def verify_identity():
                 "comparison_source": "document_face_crop_missing",
                 "details": {"error": document_face_result.get("error", "document face crop was not available")},
             }
+        stage_started_at = mark_stage(timings, "biometric_ms", stage_started_at)
         behavior_result = behavioral_service.evaluate_behavior(behavior_meta)
+        stage_started_at = mark_stage(timings, "behavior_ms", stage_started_at)
         if document_face_path:
             document_face_result["cropped_face_path"] = os.path.abspath(document_face_path)
             document_face_result["cropped_face_data_url"] = image_file_to_data_url(document_face_path)
@@ -381,9 +427,11 @@ def verify_identity():
         behavioral_score = behavior_result["behavioral_score"]
         
         final_risk = risk_engine.assess_risk(biometric_conf, ocr_const, behavioral_score)
+        stage_started_at = mark_stage(timings, "risk_ms", stage_started_at)
         
         return jsonify({
             "status": "success",
+            "timings": timings,
             "ocr_analysis": ocr_result,
             "document_face_analysis": document_face_result,
             "document_forgery_analysis": forgery_result,
@@ -394,7 +442,10 @@ def verify_identity():
 
     except Exception as e:
         app.logger.exception("Verification failed; returning degraded response")
-        return jsonify(fallback_verification_response(str(e), behavior_meta)), 200
+        response = fallback_verification_response(str(e), behavior_meta)
+        response["timings"] = timings
+        response["traceback"] = traceback.format_exc(limit=5)
+        return jsonify(response), 200
         
     finally:
         if os.path.exists(doc_path):
