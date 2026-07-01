@@ -31,7 +31,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 // Initialize Supabase with your Service Role Key (if you don't already have a client defined)
 const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-const supabase = createClient(supabaseUrl, supabaseServiceKey);
+const supabase = supabaseUrl && supabaseServiceKey ? createClient(supabaseUrl, supabaseServiceKey) : null;
 
 // Enable large limits for base64 image uploads (selfie & document scans)
 app.use(express.json({ limit: "30mb" }));
@@ -1212,6 +1212,10 @@ app.post('/api/verify-identity', upload.fields([
     };
 
     console.log("Saving records to Supabase...");
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY." });
+    }
+
     const { data: dbData, error: dbError } = await supabase
       .from('kyc_verifications')
       .insert([
@@ -1630,24 +1634,39 @@ app.post("/api/onboard/process", async (req, res) => {
 
 // Serve static frontend assets and entry points
 async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
+  try {
+    console.log("Starting Express server", {
+      nodeEnv: process.env.NODE_ENV || "development",
+      port: PORT,
+      aiServiceConfigured: Boolean(process.env.AI_SERVICE_URL),
+      supabaseConfigured: isSupabaseConfigured(),
     });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    // SPA Fallback
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Express Dev Server active on Host 0.0.0.0 (Port ${PORT})`);
-  });
+    if (process.env.NODE_ENV !== "production") {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), "dist");
+      app.use(express.static(distPath));
+      // SPA Fallback
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Express server active on Host 0.0.0.0 (Port ${PORT})`);
+    });
+  } catch (error) {
+    console.error("Express startup failed:", error);
+    process.exit(1);
+  }
 }
 
-startServer();
+startServer().catch((error) => {
+  console.error("Express startup failed:", error);
+  process.exit(1);
+});
