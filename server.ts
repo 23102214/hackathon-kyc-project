@@ -323,7 +323,7 @@ function buildAlertForEvent(eventType: string, riskScore: number, email: string)
 
 function dataUrlToBuffer(dataUrl?: string | null) {
   if (!dataUrl) return null;
-  const match = dataUrl.match(/^data:(.+);base64,(.+)$/);
+  const match = dataUrl.match(/^data:(.+);base64,(.+)$/s);
   if (!match) return null;
 
   const extension = match[1].includes("png") ? "png" : "jpg";
@@ -457,7 +457,9 @@ function documentNumberMatches(inputDocumentNumber = "", extractedDocumentNumber
 async function runPythonImageVerification(onboardingData: any, telemetry: any) {
   const documentImage = dataUrlToBuffer(onboardingData?.documentImage);
   const selfieImage = dataUrlToBuffer(onboardingData?.selfieImage);
-  if (!documentImage || !selfieImage) return null;
+  if (!documentImage || !selfieImage) {
+    throw new Error("Submitted document/selfie images were not valid base64 data URLs.");
+  }
 
   const form = new FormData();
   form.append("document_image", documentImage.buffer, {
@@ -1348,6 +1350,7 @@ app.post("/api/onboard/process", async (req, res) => {
     const isDeepfakeRisk = preset === "deepfake";
     const isSyntheticRisk = preset === "synthetic";
     const aiServiceDegraded = realAiData?.status === "degraded";
+    const aiServiceUnavailable = hasSubmittedImages && !realAiData;
 
     const extractedName = realAiData?.ocr_analysis?.extracted_data?.name || "";
     const extractedDob = realAiData?.ocr_analysis?.extracted_data?.dob || "";
@@ -1367,7 +1370,7 @@ app.post("/api/onboard/process", async (req, res) => {
     const documentFaceConfidence = Number(realDocumentFace?.confidence);
     const documentFaceCropPath = realDocumentFace?.cropped_face_path || null;
     const documentFaceCropDataUrl = realDocumentFace?.cropped_face_data_url || null;
-    const biometricComparisonSource = realAiData?.biometric_analysis?.comparison_source || "document_image";
+    const biometricComparisonSource = realAiData?.biometric_analysis?.comparison_source || "ai_service_unavailable";
     const realForgeryScore = Number(realForgery?.forgery_score);
     const realNameSimilarity = scoreNameMatch(onboardingData.fullName, extractedName, extractedText);
     const realDobMatch = dobAppearsInText(onboardingData.dob, extractedDob, extractedText);
@@ -1421,9 +1424,9 @@ app.post("/api/onboard/process", async (req, res) => {
 
     const similarityPercentage = realAiData && Number.isFinite(realBiometricConfidence)
       ? Math.round(realBiometricConfidence * 100)
-      : isDeepfakeRisk ? 30 : isEditingRisk ? 82 : 95;
+      : isDeepfakeRisk ? 30 : 0;
     const faceMatch = realAiData ? realBiometricVerified && similarityPercentage >= 80 : similarityPercentage >= 80;
-    const deepfakeConfidence = isDeepfakeRisk ? 96 : 14;
+    const deepfakeConfidence = isDeepfakeRisk ? 96 : realAiData ? 14 : 0;
 
     const backendLivenessPassed = Boolean(livenessResult?.passed);
     const backendLivenessScore = Number(livenessResult?.liveness_score);
@@ -1568,7 +1571,7 @@ app.post("/api/onboard/process", async (req, res) => {
     };
 
     // If Gemini client is running, invoke it for a high-value real explanation or validation!
-    if (client) {
+    if (client && realAiData && !aiServiceDegraded) {
       try {
         console.log("Analyzing data with real Gemini AI models...");
         const response = await client.models.generateContent({
@@ -1603,6 +1606,8 @@ app.post("/api/onboard/process", async (req, res) => {
     if (!verificationResponse.riskRating.aiExplanation) {
       if (aiServiceDegraded) {
         verificationResponse.riskRating.aiExplanation = `AI VERIFICATION DEGRADED: The backend AI service accepted the request but could not complete OCR and biometric model processing (${realAiError || "model processing unavailable"}). The candidate is routed to manual review instead of automatic rejection because the system does not have enough reliable AI evidence for a final denial.`;
+      } else if (aiServiceUnavailable) {
+        verificationResponse.riskRating.aiExplanation = `AI SERVICE UNAVAILABLE: The main app could not complete the live OCR, document-face, and biometric verification request (${realAiError || "no AI response returned"}). This result is routed to manual review and should not be treated as a completed OCR or biometric model decision.`;
       } else if (realAiData && realForgeryDetected) {
         verificationResponse.riskRating.aiExplanation = `DOCUMENT FORGERY DETECTED: The backend OpenCV forensics module found elevated tamper indicators (${detailsEditedScore}% edit risk, ${tamperedPhotoScore}% photo-region risk). The account is not activated automatically and the case is escalated for document review.`;
       } else if (realAiData && !documentFaceDetected) {

@@ -38,6 +38,29 @@ class OCRService:
                 return re.sub(r"\s+", " ", value).strip()
         return "UNKNOWN"
 
+    def extract_name(self, upper_text, raw_results):
+        labeled_match = re.search(r"\bNAME[:\s-]*([A-Z][A-Z\s]{2,40})", upper_text)
+        if labeled_match:
+            return labeled_match.group(1).strip()
+
+        blocked_terms = [
+            "INCOME TAX", "GOVT", "GOVERNMENT", "INDIA", "PERMANENT", "ACCOUNT",
+            "NUMBER", "CARD", "FATHER", "DATE", "BIRTH", "SIGNATURE", "PAN",
+        ]
+        for item in raw_results:
+            text = item[1] if len(item) > 1 else ""
+            candidate = re.sub(r"[^A-Z\s]", " ", text.upper())
+            candidate = re.sub(r"\s+", " ", candidate).strip()
+            if len(candidate) < 3 or len(candidate) > 40:
+                continue
+            if any(term in candidate for term in blocked_terms):
+                continue
+            words = candidate.split()
+            if 1 <= len(words) <= 5 and all(len(word) > 1 for word in words):
+                return candidate
+
+        return "UNKNOWN"
+
     def extract_date(self, upper_text, labels, fallback_to_first_date=False):
         month_names = "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC|JANUARY|FEBRUARY|MARCH|APRIL|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER"
         date_patterns = [
@@ -90,14 +113,14 @@ class OCRService:
         upper_text = extracted_text.upper()
         dob = self.extract_date(upper_text, r"DOB|D\s*\.?\s*O\s*\.?\s*B|DATE OF BIRTH|BIRTH", True)
         expiry = self.extract_date(upper_text, r"EXP|EXPIRY|EXPIRES|VALID UNTIL|VALID TILL", False)
-        name_match = re.search(r"\bNAME[:\s-]*([A-Z][A-Z\s]{2,40})", upper_text)
+        name = self.extract_name(upper_text, raw_results)
         document_number = self.extract_document_number(upper_text)
         address = self.extract_address(extracted_text)
 
         confidence_values = [item[2] for item in raw_results if len(item) > 2]
         average_confidence = sum(confidence_values) / len(confidence_values) if confidence_values else 0
         extracted_field_count = sum([
-            1 if name_match else 0,
+            1 if name != "UNKNOWN" else 0,
             1 if dob != "UNKNOWN" else 0,
             1 if document_number != "UNKNOWN" else 0,
         ])
@@ -108,7 +131,7 @@ class OCRService:
             "ocr_consistency_score": ocr_score,
             "extracted_text": extracted_text,
             "extracted_data": {
-                "name": name_match.group(1).strip() if name_match else "UNKNOWN",
+                "name": name,
                 "dob": dob,
                 "document_number": document_number,
                 "address": address,
