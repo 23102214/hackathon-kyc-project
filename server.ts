@@ -1335,6 +1335,9 @@ app.post("/api/onboard/process", async (req, res) => {
 
     try {
       realAiData = await runPythonImageVerification(onboardingData, telemetry);
+      if (realAiData?.status === "degraded" && realAiData?.error) {
+        realAiError = realAiData.error;
+      }
     } catch (error: any) {
       realAiError = error?.response?.data?.error || error?.message || "Python AI verification service was unavailable.";
       console.error("Python image verification failed; falling back to guarded scoring:", realAiError);
@@ -1344,6 +1347,7 @@ app.post("/api/onboard/process", async (req, res) => {
     const isEditingRisk = preset === "manually_edited";
     const isDeepfakeRisk = preset === "deepfake";
     const isSyntheticRisk = preset === "synthetic";
+    const aiServiceDegraded = realAiData?.status === "degraded";
 
     const extractedName = realAiData?.ocr_analysis?.extracted_data?.name || "";
     const extractedDob = realAiData?.ocr_analysis?.extracted_data?.dob || "";
@@ -1442,7 +1446,7 @@ app.post("/api/onboard/process", async (req, res) => {
       ? Math.round(realRiskScore * 100)
       : 15; // default approved background range
 
-    if (realAiData) {
+    if (realAiData && !aiServiceDegraded) {
       if (ocrMissingCritical) overallScore = Math.max(overallScore, 72);
       if (nameSimilarity < 70) overallScore = Math.max(overallScore, 76);
       if (!dobMatch) overallScore = Math.max(overallScore, 68);
@@ -1460,6 +1464,8 @@ app.post("/api/onboard/process", async (req, res) => {
       ) {
         overallScore = Math.min(overallScore, 28);
       }
+    } else if (aiServiceDegraded) {
+      overallScore = Math.max(overallScore, 55);
     } else if (hasSubmittedImages && realAiError) {
       overallScore = Math.max(overallScore, 55);
     } else if (isEditingRisk) {
@@ -1595,7 +1601,9 @@ app.post("/api/onboard/process", async (req, res) => {
 
     // Default backup AI explanation if Gemini wasn't setup or hit an error
     if (!verificationResponse.riskRating.aiExplanation) {
-      if (realAiData && realForgeryDetected) {
+      if (aiServiceDegraded) {
+        verificationResponse.riskRating.aiExplanation = `AI VERIFICATION DEGRADED: The backend AI service accepted the request but could not complete OCR and biometric model processing (${realAiError || "model processing unavailable"}). The candidate is routed to manual review instead of automatic rejection because the system does not have enough reliable AI evidence for a final denial.`;
+      } else if (realAiData && realForgeryDetected) {
         verificationResponse.riskRating.aiExplanation = `DOCUMENT FORGERY DETECTED: The backend OpenCV forensics module found elevated tamper indicators (${detailsEditedScore}% edit risk, ${tamperedPhotoScore}% photo-region risk). The account is not activated automatically and the case is escalated for document review.`;
       } else if (realAiData && !documentFaceDetected) {
         verificationResponse.riskRating.aiExplanation = `DOCUMENT FACE EXTRACTION FAILED: OCR completed, but the backend could not isolate a portrait/photo region from the uploaded ${onboardingData.documentType} image. DeepFace comparison requires a stored document face crop, so the request was blocked for manual identity review.`;
