@@ -40,10 +40,16 @@ risk_engine = None
 def get_services():
     global ocr_service, biometric_service, behavioral_service, risk_engine
 
-    from ai_service.modules.ocr.ocr_service import OCRService
-    from ai_service.modules.biometric.biometric_service import BiometricService
-    from ai_service.modules.behavioral.behavioral_service import BehavioralService
-    from ai_service.modules.risk_engine.risk_service import RiskEngine
+    try:
+        from ai_service.modules.ocr.ocr_service import OCRService
+        from ai_service.modules.biometric.biometric_service import BiometricService
+        from ai_service.modules.behavioral.behavioral_service import BehavioralService
+        from ai_service.modules.risk_engine.risk_service import RiskEngine
+    except ModuleNotFoundError:
+        from modules.ocr.ocr_service import OCRService
+        from modules.biometric.biometric_service import BiometricService
+        from modules.behavioral.behavioral_service import BehavioralService
+        from modules.risk_engine.risk_service import RiskEngine
 
     if ocr_service is None:
         ocr_service = OCRService()
